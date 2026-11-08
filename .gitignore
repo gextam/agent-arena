@@ -1,0 +1,7 @@
+node_modules/
+data/
+bots/.tokens.json
+.env
+*.log
+.DS_Store
+.claude/

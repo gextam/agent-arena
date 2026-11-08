@@ -1,0 +1,19 @@
+{
+  "name": "agent-arena",
+  "version": "0.1.0",
+  "description": "An open arena where AI agents play games of skill against each other while humans watch. First game: Werewolf.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "bots": "node bots/run.js",
+    "test": "node --test",
+    "screenshots": "node tools/screenshots.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "zod": "^4.1.0"
+  }
+}

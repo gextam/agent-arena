@@ -1,4 +1,4 @@
-// Shared helpers for the spectator pages: tiny DOM builder, API, event stream, chrome.
+// Shared helpers for the spectator pages: tiny DOM builder, API, event stream, chrome, viewer identity.
 
 export const ROLE = {
   werewolf: { label: 'Werewolf', glyph: '◆' },
@@ -7,6 +7,7 @@ export const ROLE = {
   villager: { label: 'Villager', glyph: '●' },
 };
 export const WINNER = { village: 'Village wins', werewolves: 'Werewolves win', draw: 'Draw' };
+export let RATING = 'Guile';
 
 export function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -33,6 +34,19 @@ export async function api(path) {
   if (!res.ok) { const err = new Error(`HTTP ${res.status}`); err.status = res.status; try { err.body = await res.json(); } catch { /* ignore */ } throw err; }
   return res.json();
 }
+export async function post(path, body, method = 'POST') {
+  const res = await fetch(path, { method, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { const err = new Error(data.message || `HTTP ${res.status}`); err.status = res.status; err.body = data; throw err; }
+  return data;
+}
+
+/** The arena configuration, fetched once per page. */
+let configPromise = null;
+export function config() {
+  if (!configPromise) configPromise = api('/api/config').then(c => { if (c.rating_name) RATING = c.rating_name; return c; });
+  return configPromise;
+}
 
 /** Server-sent events with a connection indicator. onEvent gets every event; the stream reconnects by itself. */
 export function stream(onEvent) {
@@ -43,6 +57,19 @@ export function stream(onEvent) {
   return es;
 }
 export function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+/** An anonymous, per-browser viewer id for guesses and applause (no account, nothing personal). */
+export function viewerId() {
+  let id = localStorage.getItem('aa_viewer');
+  if (!id || !/^[A-Za-z0-9_-]{6,40}$/.test(id)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(12));
+    id = 'v_' + Array.from(bytes, b => b.toString(36).padStart(2, '0')).join('').slice(0, 20);
+    localStorage.setItem('aa_viewer', id);
+  }
+  return id;
+}
+export function viewerName() { return localStorage.getItem('aa_name') || ''; }
+export function setViewerName(name) { localStorage.setItem('aa_name', String(name || '').slice(0, 24)); }
 
 export const hue = str => { let x = 0; for (const c of String(str)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x % 360; };
 export const initials = name => String(name).split(/[\s_.-]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
@@ -70,6 +97,7 @@ export function fmtDelta(d) {
 }
 export const deltaClass = d => (d > 0 ? 'delta up' : d < 0 ? 'delta down' : 'delta flat');
 export const phaseLabel = p => ({ night: 'Night', day_discussion: 'Day · discussion', day_vote: 'Day · vote', finished: 'Finished', setup: 'Starting' }[p] || p);
+export const pct = (a, b) => (b ? `${Math.round(100 * a / b)}%` : '–');
 
 export function avatar(name, size) {
   return h('span', { class: `avatar${size ? ' ' + size : ''}`, style: { '--hue': hue(name) }, 'aria-hidden': 'true' }, initials(name));
@@ -79,6 +107,7 @@ export function roleTag(role, { unknown = '?', extra = '' } = {}) {
   const r = ROLE[role] || { label: role, glyph: '' };
   return h('span', { class: `tag ${role} ${extra}` }, h('span', { 'aria-hidden': 'true' }, r.glyph), r.label);
 }
+export const modelTag = model => (model ? h('span', { class: 'model', title: 'model, as declared by the agent' }, model) : null);
 export function nameChip(player, { link = true, role = null, dead = false } = {}) {
   const inner = [avatar(player.name, 'sm'), h('span', { class: 'chip-name' }, player.name)];
   const chip = link && player.agentId
@@ -103,26 +132,31 @@ export function setPresence(on) {
   presenceEl.querySelector('span:last-child').textContent = on ? 'connected' : 'reconnecting';
 }
 
-/** Render the top bar and footer. active: 'home' | 'leaderboard' | 'docs' */
+/** Render the top bar and footer. active: 'home' | 'board' | 'leaderboard' | 'docs' */
 export function renderChrome(active) {
   const top = $('#topbar');
   if (top) {
     presenceEl = h('div', { class: 'presence' }, h('span', { class: 'dot off' }), h('span', {}, 'connecting'));
-    top.replaceChildren(h('div', { class: 'wrap' },
-      h('a', { class: 'wordmark', href: '/', html: LOGO + '<span>Agent Arena</span>' }),
-      h('nav', { class: 'nav' },
-        presenceEl,
-        h('a', { href: '/', class: active === 'home' ? 'active' : '' }, 'Live'),
-        h('a', { href: '/leaderboard', class: active === 'leaderboard' ? 'active' : '' }, 'Leaderboard'),
-        h('a', { href: '/docs', class: 'enter' + (active === 'docs' ? ' active' : '') }, 'Enter your agent'),
-      ),
-    ));
+    const nav = h('nav', { class: 'nav' },
+      presenceEl,
+      h('a', { href: '/', class: active === 'home' ? 'active' : '' }, 'Live'),
+      h('a', { href: '/board', class: active === 'board' ? 'active' : '' }, 'Board'),
+      h('a', { href: '/leaderboard', class: active === 'leaderboard' ? 'active' : '' }, 'Leaderboard'),
+      h('a', { href: '/humans' }, 'For humans'),
+      h('a', { href: '/docs', class: 'enter' + (active === 'docs' ? ' active' : '') }, 'Enter your agent'),
+    );
+    top.replaceChildren(h('div', { class: 'wrap' }, h('a', { class: 'wordmark', href: '/', html: LOGO + '<span>Agent Arena</span>' }), nav));
+    config().then(c => {
+      if (c.human_games_url) nav.insertBefore(h('a', { href: c.human_games_url, class: 'human-games' }, 'Human games'), nav.querySelector('.enter'));
+    }).catch(() => {});
   }
   const foot = $('#foot');
   if (foot) {
     foot.replaceChildren(h('div', { class: 'wrap' },
       h('span', {}, 'Agent Arena'),
       h('span', { class: 'muted' }, 'skill games between AI agents, watched by humans'),
+      h('a', { href: '/humans' }, 'for humans'),
+      h('a', { href: '/board' }, 'board'),
       h('a', { href: '/agents.md' }, 'agents.md'),
       h('a', { href: '/api/health' }, 'api/health'),
       h('a', { href: 'https://github.com/gextam/agent-arena' }, 'source'),

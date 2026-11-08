@@ -19,11 +19,11 @@ const NEUTRAL_LINES = [
   'Plain villager here. Seer, if you have something, now would be the time.',
 ];
 
-/** Builds a decide(request) function with per-game memory. */
-export function makeScriptedPlayer() {
+/** Builds a decide(request) function with per-game memory. whisper(text), when given, lets a wolf talk to its pack at night. */
+export function makeScriptedPlayer({ whisper } = {}) {
   let gameId = null;
   let mem = null;
-  const reset = () => { mem = { suspicion: {}, accusedMe: new Set(), claimedSeer: false }; };
+  const reset = () => { mem = { suspicion: {}, accusedMe: new Set(), claimedSeer: false, whisperedRound: 0 }; };
 
   function digest(req) {
     if (req.game_id !== gameId) { gameId = req.game_id; reset(); }
@@ -65,6 +65,11 @@ export function makeScriptedPlayer() {
     if (req.type === 'night') {
       if (role === 'werewolf') {
         const target = choose(d.ranked);
+        // one whisper to the pack per night, when there is a pack to whisper to
+        if (whisper && req.you.teammates && req.you.teammates.some(t => t.alive) && mem.whisperedRound !== req.round) {
+          mem.whisperedRound = req.round;
+          await whisper(pick([`${name(target)} tonight; they are the loudest.`, `I say ${name(target)}. Agree and we are done.`, `${name(target)} looks right to me. Follow if you have no better idea.`]));
+        }
         return { action: { target }, reasoning: `I am the werewolf. ${name(target)} ${mem.accusedMe.has(target) ? 'voted against me, so they go first' : 'is as good a target as any; nobody has pointed at me yet'}.` };
       }
       if (role === 'seer') {
@@ -85,7 +90,7 @@ export function makeScriptedPlayer() {
       const top = d.ranked[0];
       const wolfFound = d.inspections.find(i => i.result === 'werewolf' && !d.dead[i.player_id]);
       const cleared = d.inspections.filter(i => i.result === 'not_werewolf' && !d.dead[i.player_id]);
-      let text, why;
+      let text, why, lie = false;
       if (role === 'seer' && wolfFound && (req.round >= 2 || rnd() < .5)) {
         mem.claimedSeer = true;
         text = `I am the seer. I checked ${name(wolfFound.player_id)} last night and they are a werewolf. Vote ${name(wolfFound.player_id)} today, then come for me if I am wrong.`;
@@ -102,6 +107,7 @@ export function makeScriptedPlayer() {
           `Let us not panic-vote. That said, ${name(scapegoat)} is the one I would want checked.`,
         ]);
         why = `I am the werewolf. Pointing at ${name(scapegoat)} to move attention away from me; the claim to be a villager is a lie.`;
+        lie = true;
       } else if (mem.accusedMe.size && req.pass === 2) {
         const acc = [...mem.accusedMe].filter(id => !d.dead[id])[0];
         text = acc ? `${name(acc)} voted for me with no reason given. I am a villager; that vote is the most suspicious thing on the table.` : `I am a villager and I would like to hear a reason before anybody votes.`;
@@ -118,7 +124,8 @@ export function makeScriptedPlayer() {
         text = pick(fresh.length ? fresh : NEUTRAL_LINES);
         why = `I am a ${role}. No evidence yet, keeping it neutral.`;
       }
-      return { action: { text }, reasoning: why };
+      // the truth ledger: declared honestly, sealed until the game ends
+      return { action: { text, lie }, reasoning: why };
     }
 
     // vote
@@ -132,7 +139,15 @@ export function makeScriptedPlayer() {
   };
 }
 
+const HELLO_LINES = [
+  n => `${n} checking in. I count votes and I hold grudges.`,
+  n => `${n} here. Statistically one of you is lying. Statistically it is not me.`,
+  n => `${n}, reporting for duty. If I go quiet, I am either dead or the wolf.`,
+  n => `${n}. I do not bluff. (That was a bluff.)`,
+  n => `${n} has read the rules twice and the room once. Deal me in.`,
+];
+
 export function startScriptedBot({ name, baseUrl, persist, ...loopOptions }) {
-  const client = new ArenaClient({ name, baseUrl, persist, description: 'scripted reference bot: suspicion ledger, template sentences, no model' });
-  return runBot(client, makeScriptedPlayer(), loopOptions);
+  const client = new ArenaClient({ name, baseUrl, persist, model: 'scripted', description: 'scripted reference bot: suspicion ledger, template sentences, no model' });
+  return runBot(client, makeScriptedPlayer({ whisper: text => client.whisper(text).catch(() => {}) }), { hello: pick(HELLO_LINES), ...loopOptions });
 }

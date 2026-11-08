@@ -11,13 +11,15 @@ function saveToken(key, value) { const all = loadTokens(); all[key] = value; fs.
 
 export class ArenaClient {
   /** persist: remember the token in bots/.tokens.json so the bot keeps its identity between runs */
-  constructor({ baseUrl = process.env.ARENA_URL || 'http://localhost:3000', name, description = '', persist = true }) {
+  constructor({ baseUrl = process.env.ARENA_URL || 'http://localhost:3000', name, description = '', model = '', persist = true }) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.name = name;
     this.description = description;
+    this.model = model;
     this.persist = persist;
     this.token = null;
     this.agentId = null;
+    this.fresh = false; // true when register() created a new identity rather than reusing a saved token
   }
   async request(method, p, body) {
     const headers = { Accept: 'application/json' };
@@ -51,9 +53,10 @@ export class ArenaClient {
     let name = this.name;
     for (;;) {
       try {
-        const r = await this.request('POST', '/api/agents/register', { name, description: this.description });
+        const r = await this.request('POST', '/api/agents/register', { name, description: this.description, model: this.model });
         this.token = r.token;
         this.agentId = r.agent_id;
+        this.fresh = true;
         if (this.persist) saveToken(this.key, { token: r.token, agent_id: r.agent_id, name: r.name });
         this.name = r.name;
         return r;
@@ -67,6 +70,10 @@ export class ArenaClient {
   leave() { return this.request('POST', '/api/lobby/leave', {}); }
   pending(wait = 25) { return this.request('GET', `/api/me/pending?wait=${wait}`); }
   act(requestId, action, reasoning) { return this.request('POST', '/api/me/act', { request_id: requestId, action, reasoning }); }
+  /** A note on the agents' public message board (one per five minutes). */
+  post(text) { return this.request('POST', '/api/board', { text }); }
+  /** A werewolf's private night message to its pack. */
+  whisper(text) { return this.request('POST', '/api/me/whisper', { text }); }
 }
 
 /** A legal move for any request, used when a decision function fails. */
@@ -79,11 +86,13 @@ export function fallbackDecision(req) {
 /**
  * Register, join the lobby and play until stopped.
  * decide(request) -> { action, reasoning }
- * options: games (stop after this many finished games), delayMs (pause before each move; makes games watchable), signal, log
+ * options: games (stop after this many finished games), delayMs (pause before each move; makes games watchable), signal, log,
+ *          hello (a line for the message board, posted once when the identity is new)
  */
-export async function runBot(client, decide, { games = Infinity, delayMs = 0, signal, log = console.log, onGame } = {}) {
+export async function runBot(client, decide, { games = Infinity, delayMs = 0, signal, log = console.log, onGame, hello } = {}) {
   await client.register();
   log(`[${client.name}] ready as ${client.agentId} at ${client.baseUrl}`);
+  if (client.fresh && hello) await client.post(typeof hello === 'function' ? hello(client.name) : hello).catch(e => log(`[${client.name}] board post failed: ${e.message}`));
   await client.join(true);
   // Games are counted when they start, not when they end: with auto_requeue the next table can open
   // before the bot ever observes the gap between games. On the last game the bot leaves the queue

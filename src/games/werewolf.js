@@ -36,6 +36,8 @@ export const DEFAULT_OPTIONS = {
   discussionRounds: 2,      // passes of statements per day
   statementMaxChars: 400,
   reasoningMaxChars: 1500,
+  whisperMaxChars: 240,     // a werewolf's private message to its pack
+  whispersPerNight: 3,      // per wolf
   maxRounds: 10,            // safety valve: the game is a draw after this many rounds
   actionTimeoutMs: 45_000,  // per request
 };
@@ -142,7 +144,7 @@ export class WerewolfGame {
     const s = this.state;
     s.round++;
     s.phase = 'night';
-    s.night = { kills: {}, seer: null, doctor: null };
+    s.night = { kills: {}, seer: null, doctor: null, whispers: [] };
     this._log({ type: 'phase', phase: 'night' });
     // Every living player gets a night request, villagers included (they "sleep"),
     // so that request timing never leaks who has a role.
@@ -238,8 +240,10 @@ export class WerewolfGame {
     const s = this.state;
     const d = s.discussion;
     const text = cleanText(action && action.text, s.options.statementMaxChars);
+    // the truth ledger: an optional, sealed self-declaration that this statement is a lie
+    const lie = !timedOut && action && typeof action.lie === 'boolean' ? action.lie : null;
     const ev = this._log({ type: 'statement', playerId: req.playerId, pass: d.pass, text, timedOut });
-    this._secret({ type: 'statement', playerId: req.playerId, seq: ev.seq, reasoning, timedOut });
+    this._secret({ type: 'statement', playerId: req.playerId, seq: ev.seq, reasoning, lie, timedOut });
     if (timedOut) this._timeout(req.playerId);
     d.cursor++;
     this._nextSpeaker();
@@ -303,7 +307,37 @@ export class WerewolfGame {
     s.winner = winner;
     s.finishedAt = this.now();
     s.pending = [];
+    // the truth ledger totals: statements made and statements declared to be lies, per player
+    const lies = {}, statements = {};
+    for (const a of s.secrets.actions) {
+      if (a.type !== 'statement' || a.timedOut) continue;
+      statements[a.playerId] = (statements[a.playerId] || 0) + 1;
+      if (a.lie === true) lies[a.playerId] = (lies[a.playerId] || 0) + 1;
+    }
+    s.stats.lies = lies;
+    s.stats.statements = statements;
     this._log({ type: 'game_over', winner, roles: Object.fromEntries(s.players.map(p => [p.id, p.role])) });
+  }
+
+  /** A werewolf's private message to its pack. Night only; sealed until the game ends. */
+  whisper(playerId, text) {
+    const s = this.state;
+    if (s.status !== 'running') return { ok: false, error: 'game_finished' };
+    const p = this.player(playerId);
+    if (!p || p.role !== 'werewolf' || !p.alive) return { ok: false, error: 'not_a_werewolf', hint: 'only a living werewolf can whisper to the pack' };
+    if (s.phase !== 'night' || !s.night) return { ok: false, error: 'not_night', hint: 'the pack can only whisper at night' };
+    const t = cleanText(text, s.options.whisperMaxChars);
+    if (!t) return { ok: false, error: 'missing_text', hint: 'body must be {"text": "..."}' };
+    if (s.night.whispers.filter(w => w.playerId === playerId).length >= s.options.whispersPerNight) {
+      return { ok: false, error: 'too_many_whispers', hint: `at most ${s.options.whispersPerNight} whispers per wolf per night` };
+    }
+    s.night.whispers.push({ playerId, t: this.now(), text: t });
+    this._secret({ type: 'whisper', playerId, text: t });
+    return { ok: true, whispers: this._packWhispers() };
+  }
+  _packWhispers() {
+    const s = this.state;
+    return (s.night ? s.night.whispers : []).map(w => ({ werewolf: w.playerId, name: this.player(w.playerId).name, text: w.text, t: w.t }));
   }
 
   // ---- the arena's entry points -------------------------------------------
@@ -354,6 +388,7 @@ export class WerewolfGame {
       you.teammates = s.players.filter(p => p.role === 'werewolf' && p.id !== me.id).map(p => ({ player_id: p.id, name: p.name, alive: p.alive }));
       if (s.night) {
         you.pack_choices = Object.entries(s.night.kills).filter(([w]) => w !== me.id).map(([w, t]) => ({ werewolf: w, target: t }));
+        you.pack_whispers = this._packWhispers();
       }
     }
     if (me.role === 'seer') {
@@ -361,7 +396,7 @@ export class WerewolfGame {
     }
     const reasoningDoc = 'your private thoughts (string, revealed to spectators only after the game)';
     let respondWith;
-    if (req.type === 'statement') respondWith = { action: { text: `what you say to the village (string, max ${s.options.statementMaxChars} chars)` }, reasoning: reasoningDoc };
+    if (req.type === 'statement') respondWith = { action: { text: `what you say to the village (string, max ${s.options.statementMaxChars} chars)`, lie: 'optional boolean: true if this statement is a lie. Sealed until the game ends, then published as your truth ledger' }, reasoning: reasoningDoc };
     else if (req.options.length) respondWith = { action: { target: 'a player_id from options' }, reasoning: reasoningDoc };
     else respondWith = { action: {}, reasoning: reasoningDoc };
     return {
@@ -390,14 +425,14 @@ export class WerewolfGame {
     const s = this.state;
     if (req.type === 'night') {
       switch (me.role) {
-        case 'werewolf': return 'Night: choose a player to kill. Return action {"target": player_id} from options. If your pack disagrees, one of the chosen targets is picked at random. Nobody else sees who you chose.';
+        case 'werewolf': return 'Night: choose a player to kill. Return action {"target": player_id} from options. If your pack disagrees, one of the chosen targets is picked at random. Nobody else sees who you chose.' + (me.alive && s.players.some(p => p.role === 'werewolf' && p.alive && p.id !== me.id) ? ' Your pack can whisper tonight (the agent guide explains how); whispers so far are in you.pack_whispers, so whisper first, poll again, then choose.' : '');
         case 'seer': return 'Night: choose a player to inspect. You privately learn whether they are a werewolf (see you.inspections in later requests). Return action {"target": player_id} from options.';
         case 'doctor': return 'Night: choose a player to protect, yourself included. If the werewolves attack that player tonight, nobody dies. Return action {"target": player_id} from options.';
         default: return 'Night: you have no night power. Return action {} and use reasoning to record your private suspicions; spectators read it after the game.';
       }
     }
     if (req.type === 'statement') {
-      return `Day ${s.round}, pass ${s.discussion.pass} of ${s.options.discussionRounds}: it is your turn to speak. Every living player hears this. Return action {"text": "..."} (max ${s.options.statementMaxChars} characters).`;
+      return `Day ${s.round}, pass ${s.discussion.pass} of ${s.options.discussionRounds}: it is your turn to speak. Every living player hears this. Return action {"text": "...", "lie": true|false} (max ${s.options.statementMaxChars} characters; "lie" is optional and stays sealed until the game ends).`;
     }
     return `Day ${s.round}, vote: choose one player to eliminate. Return action {"target": player_id} from options. The player with the most votes dies and their role is revealed; a tie eliminates nobody.`;
   }

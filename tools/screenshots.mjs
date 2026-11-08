@@ -4,8 +4,9 @@
 //   node tools/screenshots.mjs            # writes docs/screenshots/*.png
 //
 // It starts its own arena on a random port with a throw-away database, fills it with scripted
-// bots (three quick games for history, then one slow game to photograph live), takes the pictures
-// and shuts everything down. Nothing private is shown: every agent is a bundled bot.
+// bots (three quick games for history, then one slow seven-player game to photograph live, with
+// pack whispers), adds a few viewer messages and guesses, takes the pictures and shuts everything
+// down. Nothing private is shown: every agent is a bundled bot.
 //
 // Environment:
 //   CHROME   path to chrome.exe / msedge.exe if it is not in a standard location
@@ -33,15 +34,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ---- a private arena full of bots ---- */
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-arena-shots-'));
-const app = await startServer({ port: 0, host: '127.0.0.1', dataDir, arena: { fillWindowMs: 800, actionTimeoutMs: 30_000, tickMs: 100 } });
+const app = await startServer({ port: 0, host: '127.0.0.1', dataDir, humanGamesUrl: 'https://cocojs.com/games/', arena: { fillWindowMs: 800, actionTimeoutMs: 30_000, tickMs: 100 } });
 const BASE = `http://127.0.0.1:${app.port}`;
 const api = p => fetch(BASE + p).then(r => r.json());
+const post = (p, body) => fetch(BASE + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
 const ctrl = new AbortController();
 const quiet = () => {};
 const bot = (name, opts) => startScriptedBot({ name, baseUrl: BASE, persist: false, signal: ctrl.signal, log: quiet, ...opts });
 console.log('arena on', BASE, '- playing three quick games for history…');
 await Promise.all(['Moonshine', 'Tallow', 'Brambleton', 'Vesper', 'Quill'].map(name => bot(name, { games: 3, delayMs: 0 })));
 console.log('history ready:', (await api('/api/health')).games, 'games');
+// viewers applaud a declared lie of the last finished game so the best-lies rail has a leader
+{
+  const last = (await api('/api/games?status=finished&limit=1')).games[0];
+  const view = await api(`/api/games/${last.id}`);
+  const lie = view.secrets.actions.find(a => a.type === 'statement' && a.lie === true && view.log[a.seq].text);
+  if (lie) for (const v of ['viewer_aa', 'viewer_bb', 'viewer_cc']) await post(`/api/games/${last.id}/applaud`, { viewer: v, seq: lie.seq });
+}
 
 /* ---- headless Chrome ---- */
 const profile = path.join(os.tmpdir(), 'agent_arena_shots_profile');
@@ -106,10 +115,10 @@ try {
   const first = ['Harrow', 'Sable', 'Finch'].map(name => bot(name, slow));
   for (let i = 0; i < 50 && (await api('/api/lobby')).waiting.length < 3; i++) await sleep(100);
   await open('/');
-  await shotEl('lobby.png', '.lobby', 0);
+  await shotEl('lobby.png', '.stage', 0);
 
-  /* ---- a live table ---- */
-  const rest = ['Marrow', 'Lantern', 'Rook'].map(name => bot(name, slow));
+  /* ---- a live table of seven (two wolves, so the pack whispers) ---- */
+  const rest = ['Marrow', 'Lantern', 'Rook', 'Wicket'].map(name => bot(name, slow));
   let game = null;
   for (let i = 0; i < 300 && !game; i++) {
     await sleep(300);
@@ -120,10 +129,17 @@ try {
     }
   }
   if (!game) throw new Error('the slow game never reached a discussion');
+  // viewers join in: chat and guesses
+  const aliveIds = game.players.filter(p => p.alive).map(p => p.id);
+  for (const [name, text] of [['Nora', 'Harrow is talking way too much for a villager'], ['kit', 'the quiet ones are the wolves. always.'], ['Dee', 'seer, say something!']]) await post(`/api/games/${game.id}/chat`, { name, text });
+  for (let i = 0; i < 9; i++) await post(`/api/games/${game.id}/guess`, { viewer: `viewer_0${i}`, target: aliveIds[i % 3] });
   await open('/');
   await shot('home.png');
-  await open(`/games/${game.id}`, "document.querySelectorAll('.statement').length >= 3");
+  await shotEl('stage.png', '.stage', 0);
+  await open(`/games/${game.id}`, "document.querySelectorAll('.statement').length >= 3 && document.querySelectorAll('.cmsg').length >= 3");
   await shot('game-live.png');
+  await shotEl('guess.png', '.guess', 0);
+  await shotEl('chat.png', '.chatbox', 0);
 
   /* ---- the finished game, then the reveal ---- */
   await Promise.all([...first, ...rest]);
@@ -138,10 +154,17 @@ try {
   await evalJs("document.querySelector('.band.day').scrollIntoView({ block: 'start' }); window.scrollBy(0, -80); 1");
   await shot('game-reveal.png');
   await shotEl('night-reveal.png', '.band.night', 0);
+  if (await evalJs("!!document.querySelector('.whispers')")) await shotEl('whispers.png', '.whispers', 10);
   await shotEl('vote.png', '.vote', 14);
   await shotEl('statement-reveal.png', '.statement.lying', 0);
+  await shotEl('crowd.png', '.guess', 0);
 
-  /* ---- leaderboard, an agent, the guide ---- */
+  /* ---- for humans, the best lies, the board, leaderboard, an agent, the guide ---- */
+  await open('/humans', "document.querySelector('.humans')");
+  await shotEl('humans.png', '.humans', 0, 1.5);
+  await shotEl('best-lies.png', '.lies-rail', 0, 1.5);
+  await open('/board', "document.querySelector('.post')");
+  await shot('board.png');
   await open('/leaderboard', "document.querySelector('table.lb tbody tr')");
   await shot('leaderboard.png');
   const top = (await api('/api/leaderboard?limit=1')).agents[0];

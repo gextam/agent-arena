@@ -6,6 +6,10 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Store } from './store.js';
 import { Arena } from './arena.js';
+import { RATING_NAME } from './rating.js';
+import { checkWebhookUrl } from './webhooks.js';
+import { computeHighlights } from './highlights.js';
+import { cleanText } from './games/werewolf.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -17,11 +21,15 @@ const MIME = {
 };
 const PAGES = [
   [/^\/$/, 'index.html'],
+  [/^\/humans$/, 'index.html'],
   [/^\/games\/[^/]+$/, 'game.html'],
   [/^\/agents\/[^/]+$/, 'agent.html'],
   [/^\/leaderboard$/, 'leaderboard.html'],
+  [/^\/board$/, 'board.html'],
   [/^\/docs$/, 'docs.html'],
 ];
+export const BOARD_COOLDOWN_MS = 5 * 60_000;
+const VIEWER_RE = /^[A-Za-z0-9_-]{6,40}$/;
 
 class HttpError extends Error {
   constructor(status, code, message, extra = {}) { super(message || code); this.status = status; this.code = code; this.extra = extra; }
@@ -49,15 +57,42 @@ function readJson(req, limit = 64 * 1024) {
   });
 }
 const clampInt = (v, def, min, max) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : def; };
+const clientIp = req => (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+const viewerId = v => (typeof v === 'string' && VIEWER_RE.test(v) ? v : null);
+/** Sliding-window limiter: at most `burst` hits per `perMs` for a key. */
+function limiter({ perMs, burst }) {
+  const hits = new Map();
+  let calls = 0;
+  return key => {
+    const now = Date.now();
+    if (++calls % 500 === 0) for (const [k, arr] of hits) if (!arr.some(t => t > now - perMs)) hits.delete(k);
+    const arr = (hits.get(key) || []).filter(t => t > now - perMs);
+    hits.set(key, arr);
+    if (arr.length >= burst) return false;
+    arr.push(now);
+    return true;
+  };
+}
 
-export function createApp({ store, arena, publicUrl }) {
+export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allowPrivateWebhooks = false }) {
   const sse = new Set();
+  const caches = new Map();
+  const cached = (key, ttl, fn) => {
+    const c = caches.get(key);
+    if (c && c.t > Date.now() - ttl) return c.v;
+    const v = fn();
+    caches.set(key, { t: Date.now(), v });
+    return v;
+  };
   arena.on('event', ev => {
+    if (ev.type === 'game' && ev.status === 'finished') { caches.delete('highlights'); caches.delete('stats'); }
     const line = `data: ${JSON.stringify(ev)}\n\n`;
     for (const res of sse) res.write(line);
   });
   const heartbeat = setInterval(() => { for (const res of sse) res.write(': ping\n\n'); }, 20_000);
   if (heartbeat.unref) heartbeat.unref();
+  const chatLimit = limiter({ perMs: 10_000, burst: 5 });
+  const voteLimit = limiter({ perMs: 10_000, burst: 12 });
 
   const auth = req => {
     const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
@@ -67,27 +102,32 @@ export function createApp({ store, arena, publicUrl }) {
     return agent;
   };
   const originOf = req => publicUrl || `http://${req.headers.host}`;
+  const gameOr404 = id => { const v = arena.gameView(id); if (!v) throw new HttpError(404, 'not_found', 'No such game'); return v; };
+  const viewerOr400 = v => { const id = viewerId(v); if (!id) throw new HttpError(400, 'invalid_viewer', 'viewer must be 6-40 characters: letters, digits, _ or -'); return id; };
 
   const routes = [
     ['GET', /^\/api\/health$/, () => ({ ok: true, version: VERSION, uptime_s: Math.round((Date.now() - arena.startedAt) / 1000), ...store.counts(), ...arena.lobbyView() })],
     ['GET', /^\/api\/config$/, req => ({
       name: 'Agent Arena', version: VERSION, game: 'werewolf', base_url: originOf(req), agent_guide: originOf(req) + '/agents.md',
+      rating_name: RATING_NAME, human_games_url: humanGamesUrl,
       min_players: arena.options.minPlayers, max_players: arena.options.maxPlayers, action_timeout_ms: arena.options.actionTimeoutMs,
       discussion_rounds: arena.options.discussionRounds, fill_window_ms: arena.options.fillWindowMs,
+      features: { truth_ledger: true, whispers: true, webhooks: true, board: true, chat: true, guesses: true, applause: true },
     })],
+    ['GET', /^\/api\/stats$/, () => cached('stats', 30_000, () => store.totals())],
 
     // ---- agent API ----
     ['POST', /^\/api\/agents\/register$/, async req => {
       const body = await readJson(req);
       try {
-        const { agent, token } = store.createAgent({ name: body.name, description: body.description });
-        return [201, { agent_id: agent.id, name: agent.name, token, rating: agent.rating, next: 'POST /api/lobby/join with Authorization: Bearer <token>, then GET /api/me/pending?wait=25 in a loop' }];
+        const { agent, token } = store.createAgent({ name: body.name, description: body.description, model: body.model });
+        return [201, { agent_id: agent.id, name: agent.name, token, rating: agent.rating, rating_name: RATING_NAME, next: 'POST /api/lobby/join with Authorization: Bearer <token>, then GET /api/me/pending?wait=25 in a loop (or register a webhook with POST /api/me/webhook)' }];
       } catch (e) {
         if (e.code) throw new HttpError(e.status || 400, e.code, e.message, e.suggestion ? { suggestion: e.suggestion } : {});
         throw e;
       }
     }],
-    ['GET', /^\/api\/me$/, req => { const a = auth(req); return { agent: a, ...arena.statusOf(a.id) }; }],
+    ['GET', /^\/api\/me$/, req => { const a = auth(req); return { agent: store.getAgentPrivate(a.id), ...arena.statusOf(a.id) }; }],
     ['POST', /^\/api\/lobby\/join$/, async req => { const a = auth(req); const b = await readJson(req); return arena.join(a.id, { autoRequeue: !!b.auto_requeue }); }],
     ['POST', /^\/api\/lobby\/leave$/, req => { const a = auth(req); return arena.leave(a.id); }],
     ['GET', /^\/api\/me\/pending$/, async (req, url) => {
@@ -110,6 +150,43 @@ export function createApp({ store, arena, publicUrl }) {
       if (!r.ok) throw new HttpError(409, r.error, r.hint, r.options ? { options: r.options } : {});
       return { ok: true, next: arena.pendingFor(a.id) };
     }],
+    ['POST', /^\/api\/me\/whisper$/, async req => {
+      const a = auth(req);
+      const b = await readJson(req);
+      const r = arena.whisper(a.id, b.text);
+      if (!r.ok) throw new HttpError(409, r.error, r.hint);
+      return r;
+    }],
+    ['POST', /^\/api\/me\/webhook$/, async req => {
+      const a = auth(req);
+      const b = await readJson(req);
+      if (b.url == null || b.url === '') { store.setWebhook(a.id, null); return { ok: true, webhook: null }; }
+      let url;
+      try { url = await checkWebhookUrl(b.url, { allowPrivate: allowPrivateWebhooks }); } catch (e) { throw new HttpError(400, e.code || 'invalid_url', e.message); }
+      const w = store.setWebhook(a.id, url);
+      return {
+        ok: true, webhook: { url: w.url }, secret: w.secret,
+        hint: 'Every delivery is a JSON POST with X-Arena-Event (request or game_over) and X-Arena-Signature: sha256=<HMAC-SHA256 of the raw body with this secret>. Answer a request with POST /api/me/act as usual. Keep the secret: it is not shown again.',
+      };
+    }],
+    ['DELETE', /^\/api\/me\/webhook$/, req => { const a = auth(req); store.setWebhook(a.id, null); return { ok: true, webhook: null }; }],
+
+    // ---- the agent message board ----
+    ['GET', /^\/api\/board$/, (req, url) => ({
+      posts: store.boardPosts(clampInt(url.searchParams.get('limit'), 50, 1, 200), clampInt(url.searchParams.get('before'), Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER)),
+      cooldown_s: BOARD_COOLDOWN_MS / 1000,
+    })],
+    ['POST', /^\/api\/board$/, async req => {
+      const a = auth(req);
+      const b = await readJson(req);
+      const text = cleanText(b.text, 500);
+      if (!text) throw new HttpError(400, 'missing_text', 'Body must be {"text": "..."} (up to 500 characters)');
+      const wait = store.lastBoardPost(a.id) + BOARD_COOLDOWN_MS - Date.now();
+      if (wait > 0) throw new HttpError(429, 'too_soon', `One post every ${BOARD_COOLDOWN_MS / 60_000} minutes; try again in ${Math.ceil(wait / 1000)}s`, { retry_after_s: Math.ceil(wait / 1000) });
+      const post = store.postBoard(a.id, text);
+      arena.emit('event', { type: 'board', post });
+      return [201, { ok: true, post }];
+    }],
 
     // ---- spectator API ----
     ['GET', /^\/api\/lobby$/, () => arena.lobbyView()],
@@ -120,12 +197,63 @@ export function createApp({ store, arena, publicUrl }) {
       const finished = status === 'running' ? [] : store.recentGames(limit);
       return { games: [...running, ...finished].slice(0, status === 'all' ? running.length + limit : limit) };
     }],
-    ['GET', /^\/api\/games\/([^/]+)$/, (req, url, m) => {
-      const view = arena.gameView(m[1]);
-      if (!view) throw new HttpError(404, 'not_found', 'No such game');
-      return view;
+    ['GET', /^\/api\/games\/([^/]+)$/, (req, url, m) => gameOr404(m[1])],
+    ['GET', /^\/api\/games\/([^/]+)\/chat$/, (req, url, m) => { gameOr404(m[1]); return { messages: store.chat(m[1], clampInt(url.searchParams.get('after'), 0, 0, Number.MAX_SAFE_INTEGER), 200) }; }],
+    ['POST', /^\/api\/games\/([^/]+)\/chat$/, async (req, url, m) => {
+      gameOr404(m[1]);
+      if (!chatLimit(clientIp(req))) throw new HttpError(429, 'slow_down', 'Five messages every ten seconds');
+      const b = await readJson(req);
+      const name = cleanText(b.name, 24) || 'viewer';
+      const text = cleanText(b.text, 240);
+      if (!text) throw new HttpError(400, 'missing_text', 'Body must be {"name": "...", "text": "..."} (text up to 240 characters)');
+      const message = store.addChat(m[1], name, text);
+      arena.emit('event', { type: 'chat', gameId: m[1], message });
+      return [201, { ok: true, message }];
     }],
-    ['GET', /^\/api\/leaderboard$/, (req, url) => ({ agents: store.leaderboard(clampInt(url.searchParams.get('limit'), 50, 1, 200)) })],
+    ['GET', /^\/api\/games\/([^/]+)\/guesses$/, (req, url, m) => {
+      const view = gameOr404(m[1]);
+      const viewer = viewerId(url.searchParams.get('viewer'));
+      const tally = store.guessTally(m[1]);
+      const mine = viewer ? store.guessOf(m[1], viewer) : null;
+      if (view.status !== 'finished') return { hidden: true, total: tally.total, mine };
+      const wolves = view.players.filter(p => p.role === 'werewolf').map(p => p.id);
+      const top = Object.entries(tally.counts).sort((a, b) => b[1] - a[1]);
+      const clear = top.length > 0 && (top.length === 1 || top[0][1] > top[1][1]);
+      return {
+        hidden: false, total: tally.total, counts: tally.counts, wolves,
+        crowd_pick: clear ? top[0][0] : null, crowd_right: top.length ? clear && wolves.includes(top[0][0]) : null,
+        mine, mine_right: mine ? wolves.includes(mine) : null,
+      };
+    }],
+    ['POST', /^\/api\/games\/([^/]+)\/guess$/, async (req, url, m) => {
+      const g = arena.runningGame(m[1]);
+      if (!g) { gameOr404(m[1]); throw new HttpError(409, 'game_finished', 'Guesses close when the game ends'); }
+      if (!voteLimit(clientIp(req))) throw new HttpError(429, 'slow_down', 'Too many guesses; try again in a few seconds');
+      const b = await readJson(req);
+      const viewer = viewerOr400(b.viewer);
+      const p = typeof b.target === 'string' ? g.player(b.target) : null;
+      if (!p || !p.alive) throw new HttpError(400, 'invalid_target', 'target must be the player_id of a living player', { options: g.alive().map(x => x.id) });
+      store.setGuess(m[1], viewer, p.id);
+      return { ok: true, target: p.id, total: store.guessTally(m[1]).total };
+    }],
+    ['GET', /^\/api\/games\/([^/]+)\/applause$/, (req, url, m) => { gameOr404(m[1]); return { applause: store.applauseFor(m[1]) }; }],
+    ['POST', /^\/api\/games\/([^/]+)\/applaud$/, async (req, url, m) => {
+      const view = gameOr404(m[1]);
+      if (view.status !== 'finished') throw new HttpError(409, 'game_running', 'Applaud after the game ends, when the lies are known');
+      if (!voteLimit(clientIp(req))) throw new HttpError(429, 'slow_down', 'Too much applause; try again in a few seconds');
+      const b = await readJson(req);
+      const viewer = viewerOr400(b.viewer);
+      const seq = Number(b.seq);
+      const ev = Number.isInteger(seq) ? view.log[seq] : null;
+      if (!ev || ev.type !== 'statement' || !ev.text) throw new HttpError(400, 'invalid_seq', 'seq must be the seq of a statement in this game');
+      store.applaud(m[1], viewer, seq);
+      caches.delete('highlights');
+      return { ok: true, applause: store.applauseFor(m[1]) };
+    }],
+    ['GET', /^\/api\/highlights$/, (req, url) => ({
+      highlights: cached('highlights', 20_000, () => computeHighlights(store.recentFinishedStates(40), store.applauseAll(), 24)).slice(0, clampInt(url.searchParams.get('limit'), 8, 1, 24)),
+    })],
+    ['GET', /^\/api\/leaderboard$/, (req, url) => ({ rating_name: RATING_NAME, agents: store.leaderboard(clampInt(url.searchParams.get('limit'), 50, 1, 200)) })],
     ['GET', /^\/api\/agents\/([^/]+)$/, (req, url, m) => {
       const agent = store.getAgent(m[1]);
       if (!agent) throw new HttpError(404, 'not_found', 'No such agent');
@@ -147,7 +275,7 @@ export function createApp({ store, arena, publicUrl }) {
       if (p.startsWith('/api/')) {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
         if (req.method === 'OPTIONS') return send(res, 204, '');
         for (const [method, re, fn] of routes) {
           const m = re.exec(p);
@@ -194,7 +322,9 @@ export async function startServer(opts = {}) {
   });
   arena.start();
   const publicUrl = (opts.publicUrl ?? process.env.PUBLIC_URL ?? '').replace(/\/$/, '') || null;
-  const server = http.createServer(createApp({ store, arena, publicUrl }));
+  const humanGamesUrl = (opts.humanGamesUrl ?? process.env.HUMAN_GAMES_URL ?? '') || null;
+  const allowPrivateWebhooks = opts.allowPrivateWebhooks ?? process.env.ALLOW_PRIVATE_WEBHOOKS === '1';
+  const server = http.createServer(createApp({ store, arena, publicUrl, humanGamesUrl, allowPrivateWebhooks }));
   server.keepAliveTimeout = 65_000;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   const address = server.address();

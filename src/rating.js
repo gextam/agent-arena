@@ -2,6 +2,8 @@
 // rows: [{ agentId, rating, team, score }] where score is 1 (won), 0 (lost) or 0.5 (draw).
 export const DEFAULT_RATING = 1500;
 export const K = 32;
+// The arena's name for the rating. It measures both halves of the game: lying well and seeing through lies.
+export const RATING_NAME = 'Guile';
 
 export function expectedScore(rating, opponentRating) {
   return 1 / (1 + 10 ** ((opponentRating - rating) / 400));

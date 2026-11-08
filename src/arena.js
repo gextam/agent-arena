@@ -1,8 +1,9 @@
-// The arena: lobby, matchmaking, request delivery, deadlines, ratings.
+// The arena: lobby, matchmaking, request delivery (long-poll and webhooks), deadlines, ratings.
 // Games themselves are pure state machines in src/games/.
 import { EventEmitter } from 'node:events';
 import { WerewolfGame, MIN_PLAYERS, MAX_PLAYERS, ROLES } from './games/werewolf.js';
 import { updateRatings } from './rating.js';
+import { deliver } from './webhooks.js';
 
 export const DEFAULT_ARENA_OPTIONS = {
   minPlayers: MIN_PLAYERS,
@@ -13,6 +14,7 @@ export const DEFAULT_ARENA_OPTIONS = {
   discussionRounds: 2,
   keepFinishedMs: 10 * 60_000,
   tickMs: 250,
+  webhookTimeoutMs: 6_000,
 };
 
 export class Arena extends EventEmitter {
@@ -28,6 +30,7 @@ export class Arena extends EventEmitter {
     this.agentGame = new Map();    // agentId -> gameId while playing
     this.waiters = new Map();      // agentId -> [{resolve, timer}] long-poll waiters
     this.lastSeen = new Map();     // agentId -> ms
+    this.pushed = new Map();       // gameId -> Set(requestId) already delivered to a webhook
     this.fillSince = null;
     this.timer = null;
     this.startedAt = Date.now();
@@ -99,7 +102,8 @@ export class Arena extends EventEmitter {
   // ---- matchmaking and deadlines ------------------------------------------
   tick() {
     const now = Date.now();
-    const fresh = this.queue.filter(q => (this.lastSeen.get(q.agentId) ?? q.joinedAt) > now - this.options.queueStaleMs);
+    // webhook agents do not poll, so a delivered request keeps them "present" for its lifetime
+    const fresh = this.queue.filter(q => (this.lastSeen.get(q.agentId) ?? q.joinedAt) > now - this.options.queueStaleMs || this.store.getWebhook(q.agentId));
     if (fresh.length !== this.queue.length) {
       this.queue = fresh;
       this._lobbyChanged();
@@ -133,6 +137,7 @@ export class Arena extends EventEmitter {
     const s = game.state;
     this.emit('event', { type: 'game', gameId: s.id, status: s.status, round: s.round, phase: s.phase, winner: s.winner });
     this._wakeWaiters();
+    if (s.status === 'running') this._pushRequests(game);
   }
   _finishGame(game) {
     const s = game.state;
@@ -140,7 +145,10 @@ export class Arena extends EventEmitter {
       const a = this.store.getAgent(p.agentId);
       const team = ROLES[p.role].team;
       const score = s.winner === 'draw' ? 0.5 : (team === s.winner ? 1 : 0);
-      return { agentId: p.agentId, playerId: p.id, role: p.role, team, score, rating: a ? a.rating : 1500, timeouts: s.stats.timeouts[p.id] || 0 };
+      return {
+        agentId: p.agentId, playerId: p.id, role: p.role, team, score, rating: a ? a.rating : 1500,
+        timeouts: s.stats.timeouts[p.id] || 0, lies: (s.stats.lies || {})[p.id] || 0, statements: (s.stats.statements || {})[p.id] || 0,
+      };
     });
     const deltas = updateRatings(rows);
     s.ratings = deltas;
@@ -150,9 +158,14 @@ export class Arena extends EventEmitter {
       if (this.autoRequeue.has(p.agentId) && !this.queue.some(q => q.agentId === p.agentId)) this.queue.push({ agentId: p.agentId, joinedAt: Date.now() });
       // tell long-pollers the game is over so they do not sit out their full wait
       for (const w of (this.waiters.get(p.agentId) || []).slice()) w.resolve(null);
+      const hook = this.store.getWebhook(p.agentId);
+      if (hook) {
+        const row = rows.find(r => r.agentId === p.agentId);
+        this._push(p.agentId, hook, 'game_over', { agent_id: p.agentId, game_id: s.id, winner: s.winner, your_role: p.role, your_team: row.team, your_score: row.score, rating: deltas[p.agentId], in_lobby: this.autoRequeue.has(p.agentId) });
+      }
     }
     this._lobbyChanged();
-    const t = setTimeout(() => this.games.delete(s.id), this.options.keepFinishedMs);
+    const t = setTimeout(() => { this.games.delete(s.id); this.pushed.delete(s.id); }, this.options.keepFinishedMs);
     if (t.unref) t.unref();
   }
 
@@ -193,6 +206,25 @@ export class Arena extends EventEmitter {
       if (payload) for (const e of list.slice()) e.resolve(payload);
     }
   }
+  /** Push every not-yet-delivered pending request of a game to the agents that registered a webhook. */
+  _pushRequests(game) {
+    const s = game.state;
+    if (!this.pushed.has(s.id)) this.pushed.set(s.id, new Set());
+    const done = this.pushed.get(s.id);
+    for (const req of s.pending) {
+      if (done.has(req.requestId)) continue;
+      const player = game.player(req.playerId);
+      const hook = this.store.getWebhook(player.agentId);
+      if (!hook) continue;
+      done.add(req.requestId);
+      this._push(player.agentId, hook, 'request', { agent_id: player.agentId, request: game.requestPayload(req) });
+    }
+  }
+  _push(agentId, hook, event, data) {
+    deliver(hook.url, hook.secret, event, data, { timeoutMs: this.options.webhookTimeoutMs })
+      .then(ok => { this.store.webhookResult(agentId, ok); this.emit('webhook', { agentId, event, ok }); })
+      .catch(() => {});
+  }
   act(agentId, requestId, action, reasoning) {
     const gid = this.agentGame.get(agentId);
     const g = gid && this.games.get(gid);
@@ -205,10 +237,22 @@ export class Arena extends EventEmitter {
     if (res.ok) this._afterChange(g);
     return res;
   }
+  /** A werewolf's private night message to its pack. */
+  whisper(agentId, text) {
+    const gid = this.agentGame.get(agentId);
+    const g = gid && this.games.get(gid);
+    if (!g || g.state.status !== 'running') return { ok: false, error: 'not_in_game', hint: 'you can only whisper while seated at a running table' };
+    const me = g.playerByAgent(agentId);
+    return g.whisper(me.id, text);
+  }
 
   // ---- spectating ----------------------------------------------------------
   runningGames() {
     return [...this.games.values()].filter(g => g.state.status === 'running').sort((a, b) => b.state.createdAt - a.state.createdAt).map(g => g.summary());
+  }
+  runningGame(id) {
+    const g = this.games.get(id);
+    return g && g.state.status === 'running' ? g : null;
   }
   gameView(id) {
     const g = this.games.get(id);

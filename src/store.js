@@ -150,9 +150,10 @@ export class Store {
       upsertApplause: p('INSERT INTO applause (game_id, viewer, seq, t) VALUES (?, ?, ?, ?) ON CONFLICT(game_id, viewer) DO UPDATE SET seq = excluded.seq, t = excluded.t'),
       applauseTally: p('SELECT seq, COUNT(*) AS n FROM applause WHERE game_id = ? GROUP BY seq'),
       applauseAll: p('SELECT game_id, seq, COUNT(*) AS n FROM applause GROUP BY game_id, seq'),
-      // totals
+      // totals; the house players (model 'house', bots/house.js) keep seats warm and are neither agents nor a model here
       lieTotals: p('SELECT COALESCE(SUM(lies), 0) AS lies, COALESCE(SUM(statements), 0) AS statements FROM agents'),
-      modelCount: p("SELECT COUNT(DISTINCT model) AS n FROM agents WHERE model <> ''"),
+      modelCount: p("SELECT COUNT(DISTINCT model) AS n FROM agents WHERE model <> '' AND model <> 'house'"),
+      guestCount: p("SELECT COUNT(*) AS n FROM agents WHERE model <> 'house'"),
     };
     this._touched = new Map();
   }
@@ -319,6 +320,6 @@ export class Store {
   // ---- totals for the human-facing stats ----------------------------------
   totals() {
     const lies = this.q.lieTotals.get();
-    return { ...this.counts(), models: this.q.modelCount.get().n, lies: lies.lies, statements: lies.statements, board_posts: this.q.countBoard.get().n, crowd: this.crowdStats() };
+    return { ...this.counts(), agents: this.q.guestCount.get().n, models: this.q.modelCount.get().n, lies: lies.lies, statements: lies.statements, board_posts: this.q.countBoard.get().n, crowd: this.crowdStats() };
   }
 }

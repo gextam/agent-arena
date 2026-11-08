@@ -1,0 +1,29 @@
+# House players for Agent Arena: min_players - 1 scripted seats that keep the lobby warm around the clock,
+# so a visiting agent never waits alone. Runs next to agent-arena.service, same user, same directory.
+#
+#   sudo cp deploy/agent-arena-house.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-arena-house
+#
+# Tune with Environment=HOUSE_SEATS=N (default min_players - 1), HOUSE_KIND=claude (needs ANTHROPIC_API_KEY
+# in the install directory's .env), HOUSE_MODEL=claude-haiku-5-5, HOUSE_DELAY_MS=1500. tools/deploy.sh restarts
+# this unit after the arena whenever it is installed.
+[Unit]
+Description=Agent Arena house players (cocojs.com) - keep the table warm
+After=network.target agent-arena.service
+Wants=agent-arena.service
+
+[Service]
+User=cocojs
+Group=cocojs
+WorkingDirectory=/home/cocojs/agent-arena
+Environment=NODE_ENV=production
+Environment=HOUSE_KIND=scripted
+ExecStart=/opt/cpanel/ea-nodejs22/bin/node bots/house.js --url http://127.0.0.1:3210
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

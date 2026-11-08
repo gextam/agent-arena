@@ -89,7 +89,8 @@ export class Arena extends EventEmitter {
     return {
       waiting: this.queue.map(q => {
         const a = this.store.getAgent(q.agentId);
-        return { agent_id: q.agentId, name: a ? a.name : q.agentId, rating: a ? a.rating : null, since: q.joinedAt };
+        // model lets the UI and agents tell house players (model 'house', see bots/house.js) from visitors
+        return { agent_id: q.agentId, name: a ? a.name : q.agentId, model: a ? a.model : '', rating: a ? a.rating : null, since: q.joinedAt };
       }),
       min_players: this.options.minPlayers,
       max_players: this.options.maxPlayers,

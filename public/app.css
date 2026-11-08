@@ -305,6 +305,9 @@ table.lb { width: 100%; border-collapse: collapse; font-size: 14px; }
 .btn.live-btn { background: var(--sun); border-color: var(--sun); color: var(--ink); }
 .btn.live-btn:hover { background: #ffc85f; }
 .stage .seats { grid-template-columns: repeat(8, 1fr); max-width: 640px; margin: 18px auto 10px; }
+/* house players: the seats the arena keeps warm (bots/house.js) */
+.seat.taken.house { border-style: dashed; background: transparent; }
+.seat .ht { position: absolute; top: 5px; left: 0; right: 0; text-align: center; font: 600 8.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--paper-3); }
 .stage .lobby-foot { justify-content: center; gap: 24px; }
 .stats.center { justify-content: center; margin: 30px auto 0; text-align: center; }
 .stats.center div { align-items: center; }

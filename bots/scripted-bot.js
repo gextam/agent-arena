@@ -147,7 +147,8 @@ const HELLO_LINES = [
   n => `${n} has read the rules twice and the room once. Deal me in.`,
 ];
 
-export function startScriptedBot({ name, baseUrl, persist, ...loopOptions }) {
-  const client = new ArenaClient({ name, baseUrl, persist, model: 'scripted', description: 'scripted reference bot: suspicion ledger, template sentences, no model' });
+/** model and description are the registered identity; bots/house.js overrides them for the house players. */
+export function startScriptedBot({ name, baseUrl, persist, model = 'scripted', description = 'scripted reference bot: suspicion ledger, template sentences, no model', ...loopOptions }) {
+  const client = new ArenaClient({ name, baseUrl, persist, model, description });
   return runBot(client, makeScriptedPlayer({ whisper: text => client.whisper(text).catch(() => {}) }), { hello: pick(HELLO_LINES), ...loopOptions });
 }

@@ -53,21 +53,30 @@ function stage() {
       ),
     );
   }
+  // house players (model 'house', bots/house.js) keep seats warm; a visitor should know one agent is enough
+  const isHouse = w => w.model === 'house';
+  const house = lobby.waiting.filter(isHouse).length;
+  const guests = lobby.waiting.length - house;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const seats = [];
   for (let i = 0; i < cfg.max_players; i++) {
     const w = lobby.waiting[i];
     seats.push(w
-      ? h('div', { class: 'seat taken', title: w.name }, avatar(w.name), h('span', { class: 'nm' }, w.name))
+      ? h('div', { class: `seat taken${isHouse(w) ? ' house' : ''}`, title: isHouse(w) ? `${w.name} · house player, keeps the table warm` : w.name },
+        isHouse(w) ? h('span', { class: 'ht' }, 'house') : null, avatar(w.name), h('span', { class: 'nm' }, w.name))
       : h('div', { class: 'seat' }, i < cfg.min_players ? `${i + 1}` : '+'));
   }
   const need = Math.max(0, cfg.min_players - lobby.waiting.length);
+  const sub = house && lobby.starts_in_ms == null
+    ? `${plural(house, 'house player')} ${house === 1 ? 'is' : 'are'} at the table; ${need <= 1 ? 'your agent starts a game the moment it joins.' : `${plural(need, 'more agent')} open a table.`} House players are scripted and beatable.`
+    : 'The next game of Werewolf starts the moment the lobby fills. A seat is one HTTP call away for any agent.';
   const foot = lobby.starts_in_ms != null
     ? [h('span', {}, 'Table is full enough. ', h('b', { id: 'starts' }, `Starting in ${Math.ceil(lobby.starts_in_ms / 1000)}s`)), h('span', {}, `${lobby.waiting.length} seated`)]
-    : [h('span', {}, need ? [h('b', {}, `${need} more`), ` agent${need === 1 ? '' : 's'} needed to open a table`] : 'Opening a table…'), h('span', {}, `${lobby.waiting.length} waiting`)];
+    : [h('span', {}, need ? [h('b', {}, `${need} more`), ` agent${need === 1 ? '' : 's'} needed to open a table`] : 'Opening a table…'), h('span', {}, house ? `${plural(guests, 'agent')} waiting · ${house} house` : `${lobby.waiting.length} waiting`)];
   return h('section', { class: `stage ${anim()}`, style: { '--i': 2 } },
     h('div', { class: 'stage-head' }, h('span', { class: 'pill night' }, 'Lobby'), h('span', { class: 'pill' }, `Table of ${cfg.min_players}–${cfg.max_players}`)),
     h('div', { class: 'stage-title' }, 'No table is playing right now'),
-    h('p', { class: 'stage-sub' }, 'The next game of Werewolf starts the moment the lobby fills. A seat is one HTTP call away for any agent.'),
+    h('p', { class: 'stage-sub' }, sub),
     h('div', { class: 'seats' }, seats),
     h('div', { class: 'lobby-foot' }, foot),
     h('div', { class: 'stage-cta' },

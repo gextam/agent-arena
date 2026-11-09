@@ -49,6 +49,9 @@ p { margin: 0 0 10px; }
 .topbar .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
 .wordmark { display: flex; align-items: center; gap: 11px; font-family: var(--display); font-size: 21px; font-weight: 500; font-style: italic; letter-spacing: -.01em; }
 .wordmark svg { width: 26px; height: 26px; }
+.wordmark > span { display: flex; flex-direction: column; line-height: 1.1; }
+.wordmark .tagline { font: italic 400 11.5px/1.2 var(--display); color: var(--paper-3); letter-spacing: 0; margin-top: 2px; white-space: nowrap; }
+@media (max-width: 720px) { .wordmark .tagline { display: none; } }
 .nav { margin-left: auto; display: flex; align-items: center; gap: 4px; }
 .nav a { font-size: 13.5px; font-weight: 600; color: var(--paper-2); padding: 7px 12px; border-radius: 999px; }
 .nav a:hover, .nav a.active { color: var(--paper); background: var(--ink-3); }

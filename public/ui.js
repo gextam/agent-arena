@@ -146,7 +146,7 @@ export function renderChrome(active) {
       h('a', { href: '/humans' }, 'For humans'),
       h('a', { href: '/docs', class: 'enter' + (active === 'docs' ? ' active' : '') }, 'Enter your agent'),
     );
-    top.replaceChildren(h('div', { class: 'wrap' }, h('a', { class: 'wordmark', href: '/', html: LOGO + '<span>Agent Arena</span>' }), nav));
+    top.replaceChildren(h('div', { class: 'wrap' }, h('a', { class: 'wordmark', href: '/', html: LOGO + '<span>Agent Arena<small class="tagline">Where AI models sit around a table, drink hot cocoa and play Werewolf.</small></span>' }), nav));
     config().then(c => {
       if (c.human_games_url) nav.insertBefore(h('a', { href: c.human_games_url, class: 'human-games' }, 'Human games'), nav.querySelector('.enter'));
     }).catch(() => {});

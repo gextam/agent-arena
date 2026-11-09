@@ -94,6 +94,26 @@ export class Store {
         t INTEGER NOT NULL,
         PRIMARY KEY (game_id, viewer)
       );
+      -- visitor tables (src/tables.js): five catalog models seated by a human, played by the arena itself
+      CREATE TABLE IF NOT EXISTS tables (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL,
+        game_id TEXT,
+        paid_by TEXT NOT NULL,
+        client TEXT NOT NULL,
+        seats TEXT NOT NULL,
+        thoughts TEXT NOT NULL DEFAULT '[]',
+        winner TEXT,
+        rounds INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS tables_created ON tables(created_at DESC);
+      -- one standing arena identity per catalog model, so its games accumulate on one record
+      CREATE TABLE IF NOT EXISTS table_identities (
+        catalog_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL REFERENCES agents(id)
+      );
     `);
     // columns added after the first release; harmless on a fresh database
     this._addColumn('agents', 'model', "TEXT NOT NULL DEFAULT ''");
@@ -154,6 +174,16 @@ export class Store {
       lieTotals: p('SELECT COALESCE(SUM(lies), 0) AS lies, COALESCE(SUM(statements), 0) AS statements FROM agents'),
       modelCount: p("SELECT COUNT(DISTINCT model) AS n FROM agents WHERE model <> '' AND model <> 'house'"),
       guestCount: p("SELECT COUNT(*) AS n FROM agents WHERE model <> 'house'"),
+      // visitor tables
+      insertTable: p('INSERT INTO tables (id, created_at, finished_at, status, game_id, paid_by, client, seats, thoughts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+      updateTable: p('UPDATE tables SET status = ?, finished_at = ?, thoughts = ?, winner = ?, rounds = ? WHERE id = ?'),
+      loseTables: p("UPDATE tables SET status = 'lost', finished_at = ? WHERE status = 'running'"),
+      tableById: p('SELECT * FROM tables WHERE id = ?'),
+      recentTables: p('SELECT * FROM tables ORDER BY created_at DESC LIMIT ?'),
+      tablesSince: p('SELECT COUNT(*) AS n FROM tables WHERE created_at >= ? AND paid_by = ?'),
+      lastTableBy: p('SELECT MAX(created_at) AS t FROM tables WHERE client = ?'),
+      identityFor: p('SELECT agent_id FROM table_identities WHERE catalog_id = ?'),
+      setIdentity: p('INSERT INTO table_identities (catalog_id, agent_id) VALUES (?, ?) ON CONFLICT(catalog_id) DO UPDATE SET agent_id = excluded.agent_id'),
     };
     this._touched = new Map();
   }
@@ -316,6 +346,26 @@ export class Store {
     for (const r of this.q.applauseAll.all()) { if (!out.has(r.game_id)) out.set(r.game_id, {}); out.get(r.game_id)[r.seq] = r.n; }
     return out;
   }
+
+  // ---- visitor tables ------------------------------------------------------
+  static tableRow(r) {
+    if (!r) return null;
+    return { id: r.id, createdAt: r.created_at, finishedAt: r.finished_at, status: r.status, gameId: r.game_id, paidBy: r.paid_by, seats: JSON.parse(r.seats), thoughts: JSON.parse(r.thoughts || '[]'), winner: r.winner || null, rounds: r.rounds || 0 };
+  }
+  createTable({ id, gameId, paidBy, client, seats }) {
+    this.q.insertTable.run(id, Date.now(), null, 'running', gameId, paidBy, client, JSON.stringify(seats), '[]');
+    return this.getTable(id);
+  }
+  /** Persist progress (the thoughts collected so far) and, when the table ends, its result. */
+  updateTable(id, { status, finishedAt = null, thoughts = [], winner = null, rounds = 0 }) { this.q.updateTable.run(status, finishedAt, JSON.stringify(thoughts), winner, rounds, id); }
+  /** At startup: no table survives a restart, so whatever was still running is lost. */
+  loseRunningTables() { this.q.loseTables.run(Date.now()); }
+  getTable(id) { return Store.tableRow(this.q.tableById.get(id)); }
+  recentTables(limit = 20) { return this.q.recentTables.all(limit).map(Store.tableRow); }
+  tablesSince(sinceMs, paidBy = 'house') { return this.q.tablesSince.get(sinceMs, paidBy).n; }
+  lastTableBy(client) { return this.q.lastTableBy.get(client).t || 0; }
+  tableIdentity(catalogId) { const r = this.q.identityFor.get(catalogId); return r ? this.getAgent(r.agent_id) : null; }
+  setTableIdentity(catalogId, agentId) { this.q.setIdentity.run(catalogId, agentId); }
 
   // ---- totals for the human-facing stats ----------------------------------
   totals() {

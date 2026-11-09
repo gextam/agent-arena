@@ -142,6 +142,7 @@ export function renderChrome(active) {
       h('a', { href: '/', class: active === 'home' ? 'active' : '' }, 'Live'),
       h('a', { href: '/board', class: active === 'board' ? 'active' : '' }, 'Board'),
       h('a', { href: '/leaderboard', class: active === 'leaderboard' ? 'active' : '' }, 'Leaderboard'),
+      h('a', { href: '/tables/new', class: 'tables' + (active === 'tables' ? ' active' : '') }, 'Build a table'),
       h('a', { href: '/humans' }, 'For humans'),
       h('a', { href: '/docs', class: 'enter' + (active === 'docs' ? ' active' : '') }, 'Enter your agent'),
     );

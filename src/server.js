@@ -10,6 +10,7 @@ import { RATING_NAME } from './rating.js';
 import { checkWebhookUrl } from './webhooks.js';
 import { computeHighlights } from './highlights.js';
 import { cleanText } from './games/werewolf.js';
+import { Tables, TableError } from './tables.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -27,6 +28,7 @@ const PAGES = [
   [/^\/leaderboard$/, 'leaderboard.html'],
   [/^\/board$/, 'board.html'],
   [/^\/docs$/, 'docs.html'],
+  [/^\/tables(\/[^/]+)?$/, 'table.html'],
 ];
 export const BOARD_COOLDOWN_MS = 5 * 60_000;
 const VIEWER_RE = /^[A-Za-z0-9_-]{6,40}$/;
@@ -74,7 +76,7 @@ function limiter({ perMs, burst }) {
   };
 }
 
-export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allowPrivateWebhooks = false }) {
+export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allowPrivateWebhooks = false, tables = null }) {
   const sse = new Set();
   const caches = new Map();
   const cached = (key, ttl, fn) => {
@@ -103,6 +105,7 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
   };
   const originOf = req => publicUrl || `http://${req.headers.host}`;
   const gameOr404 = id => { const v = arena.gameView(id); if (!v) throw new HttpError(404, 'not_found', 'No such game'); return v; };
+  const tablesOr404 = () => { if (!tables) throw new HttpError(404, 'tables_disabled', 'Visitor tables are not enabled on this arena (TABLES_ENABLED=0)'); return tables; };
   const viewerOr400 = v => { const id = viewerId(v); if (!id) throw new HttpError(400, 'invalid_viewer', 'viewer must be 6-40 characters: letters, digits, _ or -'); return id; };
 
   const routes = [
@@ -112,7 +115,7 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
       rating_name: RATING_NAME, human_games_url: humanGamesUrl,
       min_players: arena.options.minPlayers, max_players: arena.options.maxPlayers, action_timeout_ms: arena.options.actionTimeoutMs,
       discussion_rounds: arena.options.discussionRounds, fill_window_ms: arena.options.fillWindowMs,
-      features: { truth_ledger: true, whispers: true, webhooks: true, board: true, chat: true, guesses: true, applause: true },
+      features: { truth_ledger: true, whispers: true, webhooks: true, board: true, chat: true, guesses: true, applause: true, tables: !!tables },
     })],
     ['GET', /^\/api\/stats$/, () => cached('stats', 30_000, () => store.totals())],
 
@@ -190,6 +193,25 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
 
     // ---- spectator API ----
     ['GET', /^\/api\/lobby$/, () => arena.lobbyView()],
+
+    // ---- visitor tables (src/tables.js): five catalog models seated by a human, played by the arena ----
+    ['GET', /^\/api\/tables\/catalog$/, () => tablesOr404().catalogView()],
+    ['GET', /^\/api\/tables$/, (req, url) => ({ tables: tablesOr404().list(clampInt(url.searchParams.get('limit'), 12, 1, 50)) })],
+    ['POST', /^\/api\/tables$/, async req => {
+      const t = tablesOr404();
+      const b = await readJson(req);
+      try {
+        return [201, await t.create({ seats: b.seats, keys: b.keys, client: clientIp(req) })];
+      } catch (e) {
+        if (e instanceof TableError) throw new HttpError(e.status, e.code, e.message, e.extra);
+        throw e;
+      }
+    }],
+    ['GET', /^\/api\/tables\/([^/]+)$/, (req, url, m) => {
+      const v = tablesOr404().view(m[1]);
+      if (!v) throw new HttpError(404, 'not_found', 'No such table');
+      return v;
+    }],
     ['GET', /^\/api\/games$/, (req, url) => {
       const status = url.searchParams.get('status') || 'all';
       const limit = clampInt(url.searchParams.get('limit'), 20, 1, 100);
@@ -324,14 +346,27 @@ export async function startServer(opts = {}) {
   const publicUrl = (opts.publicUrl ?? process.env.PUBLIC_URL ?? '').replace(/\/$/, '') || null;
   const humanGamesUrl = (opts.humanGamesUrl ?? process.env.HUMAN_GAMES_URL ?? '') || null;
   const allowPrivateWebhooks = opts.allowPrivateWebhooks ?? process.env.ALLOW_PRIVATE_WEBHOOKS === '1';
-  const server = http.createServer(createApp({ store, arena, publicUrl, humanGamesUrl, allowPrivateWebhooks }));
+  // Provider keys for the visitor tables may live in the gitignored .env next to package.json (the same file the
+  // bots read); variables already set in the environment win.
+  const envFile = path.join(ROOT, '.env');
+  if (opts.loadEnv !== false && fs.existsSync(envFile)) {
+    try { process.loadEnvFile(envFile); } catch (e) { console.error(`could not read ${envFile}: ${e.message}`); }
+  }
+  const tables = opts.tables === false || process.env.TABLES_ENABLED === '0' ? null : new Tables({
+    store, arena, publicUrl,
+    options: {
+      maxRunning: envInt('TABLES_MAX_RUNNING', 2), perDay: envInt('TABLES_PER_DAY', 30), clientCooldownMs: envInt('TABLES_COOLDOWN_MS', 180_000),
+      paceMs: envInt('TABLES_PACE_MS', 1200), ...(opts.tables || {}),
+    },
+  });
+  const server = http.createServer(createApp({ store, arena, publicUrl, humanGamesUrl, allowPrivateWebhooks, tables }));
   server.keepAliveTimeout = 65_000;
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   const address = server.address();
   const url = publicUrl || `http://${host === '0.0.0.0' || host === '::' ? 'localhost' : host}:${address.port}`;
   return {
-    server, arena, store, url, port: address.port,
-    close: () => new Promise(resolve => { arena.stop(); server.close(() => { store.close(); resolve(); }); server.closeAllConnections?.(); }),
+    server, arena, store, tables, url, port: address.port,
+    close: () => new Promise(resolve => { tables?.stop(); arena.stop(); server.close(() => { store.close(); resolve(); }); server.closeAllConnections?.(); }),
   };
 }
 

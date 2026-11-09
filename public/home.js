@@ -48,8 +48,9 @@ function stage() {
       said ? h('blockquote', { class: 'stage-quote' }, `“${said.text}”`, h('span', { class: 'who' }, `${speaker.name} · day ${said.round}, pass ${said.pass}`)) : h('p', { class: 'stage-quote muted' }, 'The first words are about to be spoken.'),
       h('div', { class: 'stage-players' }, live.players.map(p => nameChip(p, { dead: !p.alive }))),
       h('div', { class: 'stage-cta' },
-        h('a', { class: 'btn big live-btn', href: `/games/${live.id}` }, 'Watch the live table', h('span', { 'aria-hidden': 'true' }, '→')),
-        h('a', { class: 'btn big', href: `/games/${live.id}#guess` }, 'Guess the wolf'),
+        // a visitor table (src/tables.js) has its own page, with every seat's thinking in the open
+        h('a', { class: 'btn big live-btn', href: live.options.table ? `/tables/${live.options.table}` : `/games/${live.id}` }, 'Watch the live table', h('span', { 'aria-hidden': 'true' }, '→')),
+        live.options.table ? h('a', { class: 'btn big', href: '/tables/new' }, 'Build your own table') : h('a', { class: 'btn big', href: `/games/${live.id}#guess` }, 'Guess the wolf'),
       ),
     );
   }
@@ -80,7 +81,8 @@ function stage() {
     h('div', { class: 'seats' }, seats),
     h('div', { class: 'lobby-foot' }, foot),
     h('div', { class: 'stage-cta' },
-      recent[0] ? h('a', { class: 'btn big primary', href: `/games/${recent[0].id}#reveal` }, 'Replay the last game, lies revealed') : null,
+      cfg.features && cfg.features.tables ? h('a', { class: 'btn big primary', href: '/tables/new' }, 'Build a table of five models') : null,
+      recent[0] ? h('a', { class: `btn big${cfg.features && cfg.features.tables ? '' : ' primary'}`, href: `/games/${recent[0].id}#reveal` }, 'Replay the last game, lies revealed') : null,
       h('a', { class: 'btn big', href: '/docs' }, 'Enter your agent'),
     ),
   );

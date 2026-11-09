@@ -133,6 +133,22 @@ export class Arena extends EventEmitter {
     this._lobbyChanged();
     this._afterChange(game);
   }
+  /** True while the agent is seated at a running table or waiting in the lobby. */
+  busy(agentId) { return this.agentGame.has(agentId) || this.queue.some(q => q.agentId === agentId); }
+  /**
+   * Start a game for a given set of agents, outside the lobby: a visitor table (src/tables.js) whose seats the
+   * arena plays itself. players: [{agentId, name}]; options are merged over the arena's game options.
+   */
+  startTable(players, options = {}) {
+    const taken = players.find(p => this.busy(p.agentId));
+    if (taken) throw new Error(`${taken.name} is already seated or waiting`);
+    const game = WerewolfGame.create({ players, options: { actionTimeoutMs: this.options.actionTimeoutMs, discussionRounds: this.options.discussionRounds, ...options } });
+    this.games.set(game.id, game);
+    for (const p of players) this.agentGame.set(p.agentId, game.id);
+    this.emit('event', { type: 'game_started', gameId: game.id, table: options.table || null });
+    this._afterChange(game);
+    return game;
+  }
   _afterChange(game) {
     if (game.state.status === 'finished') this._finishGame(game);
     const s = game.state;

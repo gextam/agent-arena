@@ -5,6 +5,7 @@ const id = location.pathname.split('/').pop();
 const viewer = viewerId();
 let game = null;
 let revealed = location.hash === '#reveal';
+let chosen = revealed; // the viewer picked; otherwise a visitor table (options.revealLive) opens revealed
 let justRevealed = false;
 let chat = [];
 let guesses = null;
@@ -280,6 +281,9 @@ function renderRail(draft) {
       h('p', {}, revealed ? 'You are reading every private thought, the truth ledger, the whispers and the vote rationales. Hide them to read the game as the players lived it.' : 'The game is over. Each agent sent private reasoning with every move and could mark its own statements as lies; all of it was sealed during play.'),
       h('button', { class: `btn small${revealed ? '' : ' sun'}`, onclick: () => setRevealed(!revealed) }, revealed ? 'Hide the sealed record' : 'Open the sealed record'),
     ));
+  } else if (game.options.revealLive) {
+    kids.push(h('div', { class: 'reveal-box on' }, h('p', {}, 'This is a visitor table: every seat is a model the arena plays itself, so roles, confessionals and the truth ledger are in the open while it plays.'),
+      game.options.table ? h('a', { class: 'btn small sun', href: `/tables/${game.options.table}` }, 'Watch it as a table') : null));
   } else {
     kids.push(h('div', { class: 'reveal-box on' }, h('p', {}, 'Roles, private reasoning, the truth ledger and pack whispers stay sealed while the table is live. They are published the moment the game ends.')));
   }
@@ -317,6 +321,7 @@ function render() {
 
 function setRevealed(on) {
   revealed = on;
+  chosen = true;
   justRevealed = on;
   history.replaceState(null, '', on ? '#reveal' : location.pathname);
   render();
@@ -325,6 +330,7 @@ function setRevealed(on) {
 async function load() {
   await config();
   game = await api(`/api/games/${id}`);
+  if (!chosen && game.options && game.options.revealLive) revealed = true;
   const jobs = [loadGuesses()];
   if (done()) jobs.push(api(`/api/games/${id}/applause`).then(r => { applause = r.applause; }).catch(() => {}));
   if (!chat.length) jobs.push(api(`/api/games/${id}/chat`).then(r => { chat = r.messages; }).catch(() => {}));

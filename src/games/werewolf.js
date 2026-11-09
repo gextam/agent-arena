@@ -474,10 +474,11 @@ export class WerewolfGame {
     return lines;
   }
 
-  /** What spectators see. Roles and private reasoning appear once the game is over. */
+  /** What spectators see. Roles and private reasoning appear once the game is over, or from the start at a
+   *  visitor table (options.revealLive, src/tables.js), where every seat is played by the arena itself. */
   publicView() {
     const s = this.state;
-    const done = s.status === 'finished';
+    const done = s.status === 'finished' || !!s.options.revealLive;
     return {
       id: s.id,
       kind: s.kind,

@@ -185,6 +185,8 @@ export class Store {
       tableById: p('SELECT * FROM tables WHERE id = ?'),
       recentTables: p('SELECT * FROM tables ORDER BY created_at DESC LIMIT ?'),
       tablesSince: p('SELECT COUNT(*) AS n FROM tables WHERE created_at >= ? AND paid_by = ?'),
+      tablesByClientSince: p('SELECT COUNT(*) AS n FROM tables WHERE client = ? AND created_at >= ? AND paid_by = ?'),
+      tablesCreatedSince: p('SELECT * FROM tables WHERE created_at >= ? ORDER BY created_at ASC'),
       lastTableBy: p('SELECT MAX(created_at) AS t FROM tables WHERE client = ?'),
       identityFor: p('SELECT agent_id FROM table_identities WHERE catalog_id = ?'),
       setIdentity: p('INSERT INTO table_identities (catalog_id, agent_id) VALUES (?, ?) ON CONFLICT(catalog_id) DO UPDATE SET agent_id = excluded.agent_id'),
@@ -369,6 +371,9 @@ export class Store {
   getTable(id) { return Store.tableRow(this.q.tableById.get(id)); }
   recentTables(limit = 20) { return this.q.recentTables.all(limit).map(Store.tableRow); }
   tablesSince(sinceMs, paidBy = 'house') { return this.q.tablesSince.get(sinceMs, paidBy).n; }
+  tablesByClientSince(client, sinceMs, paidBy = 'house') { return this.q.tablesByClientSince.get(client, sinceMs, paidBy).n; }
+  /** Every table created since the time given, oldest first, with its per-move record (the house's spend ledger is rebuilt from it). */
+  tablesCreatedSince(sinceMs) { return this.q.tablesCreatedSince.all(sinceMs).map(Store.tableRow); }
   lastTableBy(client) { return this.q.lastTableBy.get(client).t || 0; }
   tableIdentity(catalogId) { const r = this.q.identityFor.get(catalogId); return r ? this.getAgent(r.agent_id) : null; }
   setTableIdentity(catalogId, agentId) { this.q.setIdentity.run(catalogId, agentId); }

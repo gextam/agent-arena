@@ -7,6 +7,19 @@ const pathname = location.pathname.replace(/\/+$/, '');
 const tableId = (/^\/tables\/([^/]+)$/.exec(pathname) || [])[1];
 const fmtUsd = n => (n == null ? '–' : n === 0 ? '$0' : n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
 const fmtSecs = ms => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+const fmtWait = s => (s < 3600 ? `${Math.max(1, Math.ceil(s / 60))} min` : `${Math.round(s / 3600)} h`);
+
+/** The small print under the builder: what can run, and whether the house is paying right now. */
+function houseLine(lim) {
+  const tables = `${lim.max_running} table${lim.max_running === 1 ? '' : 's'} can play at once (${lim.running} now). `;
+  if (!lim.house_closed) {
+    return tables + `The house pays for ${lim.house_tables_left} more table${lim.house_tables_left === 1 ? '' : 's'} today and has ${fmtUsd(lim.house_left_usd)} of its ${fmtUsd(lim.house_budget_usd)} a day left. `;
+  }
+  const why = lim.house_closed === 'budget' ? `The house has spent its ${fmtUsd(lim.house_budget_usd)} for today`
+    : lim.house_closed === 'per_day' ? `The house has paid for its ${lim.per_day} tables today`
+      : `You have had your ${lim.per_client_day} house-paid table${lim.per_client_day === 1 ? '' : 's'} for today`;
+  return tables + `${why}, so every seat needs your own key for now${lim.house_reopens_s ? `; it reopens in about ${fmtWait(lim.house_reopens_s)}` : ''}. `;
+}
 const vendorTag = (seat, extra = '') => h('span', { class: `model ${extra}`, title: seat.model }, seat.vendor_name || seat.vendor);
 const isNew = released => Date.now() - new Date(released).getTime() < 75 * 86_400_000;
 
@@ -107,7 +120,7 @@ function buildTable() {
         ),
         need.length ? h('div', { class: 'keys' },
           h('h3', {}, 'Your key'),
-          h('p', { class: 'muted' }, `${picked.filter(m => !m.house).map(m => m.name).join(', ')}: the house does not pay for ${picked.filter(m => !m.house).length === 1 ? 'this one' : 'these'}. Paste a key below. It is used for this table only, kept in memory while the game runs, and never stored or logged.`),
+          h('p', { class: 'muted' }, `${picked.filter(m => !m.house).map(m => m.name).join(', ')}: ${lim.house_closed ? 'the house is not paying right now' : `the house does not pay for ${picked.filter(m => !m.house).length === 1 ? 'this one' : 'these'}`}. Paste a key below. It is used for this table only, kept in memory while the game runs, and never stored or logged.`),
           h('div', { class: 'keyrow' }, need.map(k => h('label', {}, h('span', {}, k === 'anthropic' ? 'Anthropic API key' : 'OpenRouter API key'),
             h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: k === 'anthropic' ? 'sk-ant-…' : 'sk-or-…', value: keys[k], oninput: e => { keys[k] = e.target.value; error = null; renderBar(); } })))),
         ) : null,
@@ -115,7 +128,7 @@ function buildTable() {
         error ? h('div', { class: 'note tb-err' }, error.message, error.error === 'tables_full' && error.running ? [' ', h('a', { href: `/tables/${error.running[0]}` }, 'Watch the table that is playing →')] : null) : null,
         h('p', { class: 'tb-fine muted' },
           `${cat.models.length} models from ${new Set(cat.models.map(m => m.vendor)).size} vendors, prices as of ${cat.prices_as_of}. `,
-          noHouse ? 'This arena has no house keys configured, so every seat needs your own key. ' : `${lim.max_running} table${lim.max_running === 1 ? '' : 's'} can play at once (${lim.running} now); the house pays for ${lim.house_tables_left} more table${lim.house_tables_left === 1 ? '' : 's'} today. `,
+          noHouse ? 'This arena has no house keys configured, so every seat needs your own key. ' : houseLine(lim),
           'Every table is a rated arena game: each model keeps one record across every table it is seated at.'),
       ),
       recent.length ? h('section', { class: 'sec' },

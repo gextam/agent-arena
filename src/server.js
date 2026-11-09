@@ -198,7 +198,7 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
     ['GET', /^\/api\/lobby$/, () => arena.lobbyView()],
 
     // ---- visitor tables (src/tables.js): five catalog models seated by a human, played by the arena ----
-    ['GET', /^\/api\/tables\/catalog$/, () => tablesOr404().catalogView()],
+    ['GET', /^\/api\/tables\/catalog$/, req => tablesOr404().catalogView({ client: clientIp(req) })],
     ['GET', /^\/api\/tables$/, (req, url) => ({ tables: tablesOr404().list(clampInt(url.searchParams.get('limit'), 12, 1, 50)) })],
     ['POST', /^\/api\/tables$/, async req => {
       const t = tablesOr404();
@@ -332,6 +332,7 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
 }
 
 const envInt = (name, def) => { const v = parseInt(process.env[name] ?? '', 10); return Number.isFinite(v) ? v : def; };
+const envNum = (name, def) => { const s = process.env[name]; const v = Number(s); return s != null && s.trim() !== '' && Number.isFinite(v) ? v : def; };
 const argValue = name => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 
 export async function startServer(opts = {}) {
@@ -358,7 +359,8 @@ export async function startServer(opts = {}) {
   const tables = opts.tables === false || process.env.TABLES_ENABLED === '0' ? null : new Tables({
     store, arena, publicUrl,
     options: {
-      maxRunning: envInt('TABLES_MAX_RUNNING', 2), perDay: envInt('TABLES_PER_DAY', 30), clientCooldownMs: envInt('TABLES_COOLDOWN_MS', 180_000),
+      maxRunning: envInt('TABLES_MAX_RUNNING', 2), perDay: envInt('TABLES_PER_DAY', 30), perClientDay: envInt('TABLES_PER_CLIENT_DAY', 5),
+      houseBudgetUsd: envNum('TABLES_HOUSE_BUDGET_USD', 10), clientCooldownMs: envInt('TABLES_COOLDOWN_MS', 180_000),
       paceMs: envInt('TABLES_PACE_MS', 1200), ...(opts.tables || {}),
     },
   });

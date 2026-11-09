@@ -6,8 +6,10 @@
 //
 // Who pays: a model that is cheap enough (src/catalog.js, isCheap) plays on the house's keys when the arena has
 // them; anything else needs the visitor's own key, which is held in memory for that one table, never stored or
-// logged. Caps keep the bill bounded: tables running at once, house-paid tables per day, one new table per
-// visitor every few minutes.
+// logged. Caps keep the bill bounded: a dollar budget per day for the house (the hard ceiling), house-paid tables
+// per day and per visitor, tables running at once, one new table per visitor every few minutes. When the house is
+// closed by any of them, the cheap models simply take the visitor's key like the dear ones, and a seat already
+// playing on the house makes neutral moves once the budget is gone.
 //
 // What the audience gets that the agent API does not: a per-move record (src/store.js, tables.thoughts) with the
 // model's response time, its token use and cost, and, where the provider returns one, a readable summary of the
@@ -22,6 +24,8 @@ export const DEFAULT_TABLE_OPTIONS = {
   seats: 5,                      // one werewolf, one seer, three villagers
   maxRunning: 2,                 // tables playing at once, house-paid or not
   perDay: 30,                    // house-paid tables per rolling 24 hours
+  perClientDay: 5,               // house-paid tables per visitor (by address) per rolling 24 hours
+  houseBudgetUsd: 10,            // what the house spends on visitor tables per rolling 24 hours, in USD; 0 = nothing
   clientCooldownMs: 3 * 60_000,  // one new table per visitor (by address) in this window
   paceMs: 1200,                  // a move takes at least this long, so a table of fast models stays watchable
   effort: 'low',                 // reasoning effort for seats the house pays for
@@ -35,6 +39,8 @@ export const DEFAULT_TABLE_OPTIONS = {
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const THINKING_MAX_CHARS = 4000;
+const DAY_MS = 86_400_000;
+const fmtUsd = n => `$${Number(n).toFixed(2)}`;
 
 export class TableError extends Error {
   constructor(status, code, message, extra = {}) { super(message); this.status = status; this.code = code; this.extra = extra; }
@@ -69,9 +75,44 @@ export class Tables {
     this.stopped = false;
     // a table never survives a restart: whatever was running when the process died is lost
     this.store.loseRunningTables();
+    // the house's spend ledger, one entry per paid move, seeded from the store so a restart forgets nothing
+    this.spend = [];
+    for (const t of this.store.tablesCreatedSince(Date.now() - DAY_MS - 3_600_000)) {
+      const paid = new Set(t.seats.filter(s => s.paid_by === 'house' && s.route !== 'scripted').map(s => s.seat));
+      for (const th of t.thoughts) if (paid.has(th.seat) && th.cost_usd > 0) this.spend.push({ t: th.t, usd: th.cost_usd });
+    }
     arena.on('event', ev => { if (ev.type === 'game' && ev.status === 'finished') this._gameFinished(ev.gameId); });
   }
   stop() { this.stopped = true; }
+
+  /** USD the house has spent on visitor tables in the last 24 hours, running tables included. */
+  houseSpent(now = Date.now()) {
+    const since = now - DAY_MS;
+    this.spend = this.spend.filter(e => e.t >= since);
+    return round6(this.spend.reduce((a, e) => a + e.usd, 0));
+  }
+  /**
+   * Why the house is not paying right now: 'budget' (its dollars for the day are spent), 'per_day' (it has paid for
+   * enough tables today) or 'per_client' (this visitor has had their share); null while it is open.
+   */
+  houseClosed(clientKey = null, now = Date.now()) {
+    const o = this.o;
+    if (this.houseSpent(now) >= o.houseBudgetUsd) return 'budget';
+    if (this.store.tablesSince(now - DAY_MS, 'house') >= o.perDay) return 'per_day';
+    if (clientKey && o.perClientDay > 0 && this.store.tablesByClientSince(clientKey, now - DAY_MS, 'house') >= o.perClientDay) return 'per_client';
+    return null;
+  }
+  /** Seconds until the house may reopen: when what counts against it starts leaving the 24-hour window. */
+  _reopensIn(reason, now = Date.now()) {
+    if (reason === 'budget' && this.spend.length) return Math.max(60, Math.ceil((Math.min(...this.spend.map(e => e.t)) + DAY_MS - now) / 1000));
+    return 3600;
+  }
+  _closedWhy(reason) {
+    const o = this.o;
+    if (reason === 'budget') return `the house has spent its ${fmtUsd(o.houseBudgetUsd)} for the last 24 hours`;
+    if (reason === 'per_day') return `the house has paid for ${o.perDay} tables in the last 24 hours`;
+    return `the house pays for ${o.perClientDay} table${o.perClientDay === 1 ? '' : 's'} a day per visitor and you have had ${o.perClientDay === 1 ? 'yours' : 'them'}`;
+  }
 
   entry(id) { return this.catalog.find(e => e.id === id) || null; }
   running() { return [...this.live.values()].filter(t => t.status === 'running'); }
@@ -80,13 +121,13 @@ export class Tables {
   needs(entry) { return entry.provider === 'scripted' ? [] : entry.provider === 'anthropic' ? ['anthropic', 'openrouter'] : ['openrouter']; }
 
   /**
-   * How a model gets called: the house pays when the model is cheap and the arena has a key for a route to it,
-   * otherwise the visitor's key; null when nobody can pay. The key never leaves the returned object.
+   * How a model gets called: the house pays when the model is cheap, the arena has a key for a route to it and the
+   * house is open; otherwise the visitor's key; null when nobody can pay. The key never leaves the returned object.
    */
-  routeFor(entry, visitorKeys = {}) {
+  routeFor(entry, visitorKeys = {}, houseOpen = true) {
     if (entry.provider === 'scripted') return { kind: 'scripted', paidBy: 'house', model: entry.model };
     const route = (kind, key, paidBy) => (key ? { kind, key, paidBy, model: kind === 'anthropic' ? entry.model : entry.openrouter } : null);
-    const house = this.keys, mine = visitorKeys;
+    const house = houseOpen ? this.keys : {}, mine = visitorKeys;
     if (entry.provider === 'anthropic') {
       return (isCheap(entry) && (route('anthropic', house.anthropic, 'house') || route('openrouter', house.openrouter, 'house')))
         || route('anthropic', mine.anthropic, 'visitor') || route('openrouter', mine.openrouter, 'visitor') || null;
@@ -94,16 +135,27 @@ export class Tables {
     return (isCheap(entry) && route('openrouter', house.openrouter, 'house')) || route('openrouter', mine.openrouter, 'visitor') || null;
   }
 
-  /** The picker's view: every model with whether the house pays for it, what it costs, and the limits. */
-  catalogView() {
+  /** The picker's view: every model with whether the house pays for it (for this visitor, right now), what it costs, and the limits. */
+  catalogView({ client = null } = {}) {
+    const o = this.o;
     const now = Date.now();
-    const today = this.store.tablesSince(now - 86_400_000, 'house');
+    const today = this.store.tablesSince(now - DAY_MS, 'house');
+    const spent = this.houseSpent(now);
+    const clientKey = client ? hashClient(client) : null;
+    const closed = this.houseClosed(clientKey, now);
     return {
       prices_as_of: PRICES_AS_OF,
       house_keys: { anthropic: !!this.keys.anthropic, openrouter: !!this.keys.openrouter },
-      limits: { seats: this.o.seats, max_running: this.o.maxRunning, running: this.running().length, per_day: this.o.perDay, house_tables_today: today, house_tables_left: Math.max(0, this.o.perDay - today), cooldown_s: Math.round(this.o.clientCooldownMs / 1000) },
+      limits: {
+        seats: o.seats, max_running: o.maxRunning, running: this.running().length,
+        per_day: o.perDay, house_tables_today: today, house_tables_left: Math.max(0, o.perDay - today),
+        house_budget_usd: o.houseBudgetUsd, house_spent_usd: spent, house_left_usd: round6(Math.max(0, o.houseBudgetUsd - spent)),
+        per_client_day: o.perClientDay, your_house_tables_today: clientKey ? this.store.tablesByClientSince(clientKey, now - DAY_MS, 'house') : null,
+        house_closed: closed, house_reopens_s: closed ? this._reopensIn(closed, now) : null,
+        cooldown_s: Math.round(o.clientCooldownMs / 1000),
+      },
       models: this.catalog.map(e => {
-        const r = this.routeFor(e);
+        const r = this.routeFor(e, {}, !closed);
         return {
           id: e.id, vendor: e.vendor, vendor_name: VENDORS[e.vendor] || e.vendor, name: e.name, model: e.model, released: e.released,
           price: e.price, reasoning: !!e.reasoning, cheap: isCheap(e), house: !!r, needs: r ? [] : this.needs(e), est_cost: round6(estimateSeatCost(e)),
@@ -147,22 +199,34 @@ export class Tables {
     });
     if (new Set(entries.map(e => e.id)).size !== entries.length) throw new TableError(400, 'duplicate_model', 'Each seat needs a different model');
     const mine = { anthropic: cleanKey(keys && keys.anthropic), openrouter: cleanKey(keys && keys.openrouter) };
-    const routes = entries.map(e => this.routeFor(e, mine));
+    const now = Date.now();
+    const clientKey = hashClient(client);
+    // while the house is closed (budget spent, enough tables today, this visitor's share had) cheap models need a key too
+    const closed = this.houseClosed(clientKey, now);
+    const routes = entries.map(e => this.routeFor(e, mine, !closed));
     const missing = entries.filter((e, i) => !routes[i]);
     if (missing.length) {
       const wanted = [...new Set(missing.flatMap(e => this.needs(e)))];
-      throw new TableError(400, 'needs_key', `${missing.map(e => e.name).join(', ')}: the house does not pay for ${missing.length === 1 ? 'this model' : 'these models'}; bring your own ${wanted.join(' or ')} key`, { models: missing.map(e => e.id), keys: wanted });
+      const names = missing.map(e => e.name).join(', ');
+      if (closed && missing.some(isCheap)) {
+        throw new TableError(429, 'house_closed', `${names}: ${this._closedWhy(closed)}; bring your own ${wanted.join(' or ')} key, or come back later`, { reason: closed, retry_after_s: this._reopensIn(closed, now), models: missing.map(e => e.id), keys: wanted });
+      }
+      throw new TableError(400, 'needs_key', `${names}: the house does not pay for ${missing.length === 1 ? 'this model' : 'these models'}; bring your own ${wanted.join(' or ')} key`, { models: missing.map(e => e.id), keys: wanted });
     }
-    const paidBy = routes.some(r => r.paidBy === 'house' && r.kind !== 'scripted') ? 'house' : 'visitor';
-    const now = Date.now();
+    const houseSeats = entries.filter((e, i) => routes[i].paidBy === 'house' && routes[i].kind !== 'scripted');
+    const paidBy = houseSeats.length ? 'house' : 'visitor';
     if (this.running().length >= o.maxRunning) {
       throw new TableError(429, 'tables_full', `${o.maxRunning} table${o.maxRunning === 1 ? ' is' : 's are'} the most that can play at once; watch one of them or try again in a few minutes`, { retry_after_s: 120, running: this.running().map(t => t.id) });
     }
-    const clientKey = hashClient(client);
     const wait = this.store.lastTableBy(clientKey) + o.clientCooldownMs - now;
     if (wait > 0) throw new TableError(429, 'slow_down', `One new table every ${Math.round(o.clientCooldownMs / 60_000)} minutes per visitor; try again in ${Math.ceil(wait / 1000)}s`, { retry_after_s: Math.ceil(wait / 1000) });
-    if (paidBy === 'house' && this.store.tablesSince(now - 86_400_000, 'house') >= o.perDay) {
-      throw new TableError(429, 'daily_limit', `The house has paid for ${o.perDay} tables in the last 24 hours; bring your own key, or come back tomorrow`, { retry_after_s: 3600 });
+    if (houseSeats.length) {
+      // the budget is checked against what this table is expected to cost, so the last dollar is not overspent by a whole game
+      const spent = this.houseSpent(now);
+      const estimate = round6(houseSeats.reduce((a, e) => a + estimateSeatCost(e), 0));
+      if (spent + estimate > o.houseBudgetUsd) {
+        throw new TableError(429, 'budget_spent', `This table would take the house past its ${fmtUsd(o.houseBudgetUsd)} for the last 24 hours (${fmtUsd(spent)} spent, about ${fmtUsd(estimate)} more); bring your own key, or come back later`, { retry_after_s: this._reopensIn('budget', now), spent_usd: spent, budget_usd: o.houseBudgetUsd, estimate_usd: estimate });
+      }
     }
     const agents = entries.map(e => this.identityFor(e));
     const taken = agents.find(a => this.arena.busy(a.id));
@@ -202,12 +266,20 @@ export class Tables {
       }
       const t0 = Date.now();
       let out, error = null;
-      try {
-        out = await decide(req);
-      } catch (e) {
-        error = String(e.message || e).slice(0, 200);
-        this.log(`[tables] ${table.id} ${seat.name}: ${error}; the house moves for it`);
-        out = { ...(await standIn(req)), thinking: null, usage: null, reasoning: `${seat.name} did not answer (${error}); the arena made a neutral move on its behalf.` };
+      const onTheHouse = seat.paid_by === 'house' && route.kind !== 'scripted';
+      if (onTheHouse && this.houseSpent() >= this.o.houseBudgetUsd) {
+        // the safety net under the estimate: once the day's dollars are gone, no more calls on the house's keys
+        error = 'house budget spent';
+        if (!table.overBudget) { table.overBudget = true; this.log(`[tables] ${table.id}: the house has spent its ${fmtUsd(this.o.houseBudgetUsd)} for the day; its seats make neutral moves from here`); }
+        out = { ...(await standIn(req)), thinking: null, usage: null, reasoning: `${seat.name} sat this move out: the house had spent its ${fmtUsd(this.o.houseBudgetUsd)} for the day, so the arena made a neutral move on its behalf.` };
+      } else {
+        try {
+          out = await decide(req);
+        } catch (e) {
+          error = String(e.message || e).slice(0, 200);
+          this.log(`[tables] ${table.id} ${seat.name}: ${error}; the house moves for it`);
+          out = { ...(await standIn(req)), thinking: null, usage: null, reasoning: `${seat.name} did not answer (${error}); the arena made a neutral move on its behalf.` };
+        }
       }
       const ms = Date.now() - t0;
       if (ms < this.o.paceMs) await sleep(this.o.paceMs - ms);
@@ -226,6 +298,7 @@ export class Tables {
         error, stand_in: !!error, applied: r.ok, late: !r.ok && r.error === 'unknown_request',
       };
       table.thoughts.push(thought);
+      if (onTheHouse && thought.cost_usd > 0) this.spend.push({ t: thought.t, usd: thought.cost_usd });
       this._persist(table);
     }
   }
@@ -273,7 +346,7 @@ export class Tables {
     table.rounds = view ? view.round : 0;
     this._persist(table);
     const totals = this._totals(table);
-    this.log(`[tables] ${table.id} finished: ${table.winner} in ${table.rounds} round${table.rounds === 1 ? '' : 's'}, $${totals.cost_usd.toFixed(4)}, ${totals.stand_ins} stand-in move${totals.stand_ins === 1 ? '' : 's'}`);
+    this.log(`[tables] ${table.id} finished: ${table.winner} in ${table.rounds} round${table.rounds === 1 ? '' : 's'}, $${totals.cost_usd.toFixed(4)}, ${totals.stand_ins} stand-in move${totals.stand_ins === 1 ? '' : 's'}; the house has spent ${fmtUsd(this.houseSpent())} of its ${fmtUsd(this.o.houseBudgetUsd)} today`);
     const t = setTimeout(() => this.live.delete(table.id), this.o.keepFinishedMs);
     if (t.unref) t.unref();
   }

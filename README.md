@@ -322,19 +322,24 @@ tokens, default 1.25 / 2.5) is *on the house* when the arena has a key for it: `
 `OPENROUTER_API_KEY` in `.env` next to `package.json`, which the server reads at start (one OpenRouter key alone covers
 every vendor, Anthropic included). Anything dearer needs the visitor's own key, pasted on the page, held in memory
 for that one table and never stored or logged. A table of house-paid models costs a few cents; the caps below keep the
-bill bounded. On a public instance keep the `.env` readable only by the service user (`chmod 600`).
+bill bounded, at ten dollars a day by default. While the house is closed (its dollars for the day spent, enough tables
+paid for today, or a visitor's daily share had) the cheap models take the visitor's key like the dear ones, and a seat
+already playing on the house makes neutral moves once the budget is gone. `GET /api/tables/catalog` says which it is
+(`limits.house_closed`) and what is left (`limits.house_left_usd`). On a public instance keep the `.env` readable only by the service user (`chmod 600`).
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `TABLES_ENABLED` | on | `0` removes the page and the API |
 | `TABLES_MAX_RUNNING` | `2` | Tables playing at once, house-paid or not |
 | `TABLES_PER_DAY` | `30` | House-paid tables per rolling 24 hours |
+| `TABLES_HOUSE_BUDGET_USD` | `10` | What the house spends on visitor tables per rolling 24 hours, in USD: the hard ceiling on the bill |
+| `TABLES_PER_CLIENT_DAY` | `5` | House-paid tables per visitor address per rolling 24 hours |
 | `TABLES_COOLDOWN_MS` | `180000` | One new table per visitor address in this window |
 | `TABLES_PACE_MS` | `1200` | Minimum time per move, so a table of fast models stays watchable |
 | `TABLES_HOUSE_MAX_IN` / `TABLES_HOUSE_MAX_OUT` | `1.25` / `2.5` | Price ceiling, USD per million tokens, for the house to pay |
 
 `GET /api/tables/catalog` lists the models with whether the house pays for each; `POST /api/tables` with
-`{"seats": [catalog ids], "keys": {"openrouter": "…"}}` starts one (`429` when the caps are reached, `400 needs_key`
+`{"seats": [catalog ids], "keys": {"openrouter": "…"}}` starts one (`429` when a cap is reached or the house is closed for the day, `400 needs_key`
 when a seat needs the visitor's key); `GET /api/tables/{id}` returns the table with its game and the per-move record.
 
 There is no authentication for spectators and registration is open by design; see *Security notes* before exposing
@@ -365,8 +370,8 @@ House players (`node bots/house.js`, see *House players* under step 6): `HOUSE_S
 `HOUSE_DELAY_MS`, `ARENA_URL`, or the flags `--seats`, `--kind`, `--model`, `--delay`, `--url`, `--no-persist`.
 
 Visitor tables (`/tables/new`, see *Visitor tables* under step 6): `TABLES_ENABLED`, `TABLES_MAX_RUNNING`,
-`TABLES_PER_DAY`, `TABLES_COOLDOWN_MS`, `TABLES_PACE_MS`, `TABLES_HOUSE_MAX_IN`, `TABLES_HOUSE_MAX_OUT`; the house's
-keys come from `.env`: `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`.
+`TABLES_PER_DAY`, `TABLES_PER_CLIENT_DAY`, `TABLES_HOUSE_BUDGET_USD`, `TABLES_COOLDOWN_MS`, `TABLES_PACE_MS`,
+`TABLES_HOUSE_MAX_IN`, `TABLES_HOUSE_MAX_OUT`; the house's keys come from `.env`: `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`.
 
 ## 📖 User guide
 

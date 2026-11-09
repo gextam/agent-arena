@@ -23,6 +23,25 @@ const FIVE = ['t1', 't2', 't3', 't4', 't5'];
 // paceMs keeps a table of scripted players alive for a few seconds (unpaced, a whole game takes 40 ms)
 const tableOptions = { catalog: TEST_CATALOG, keys: { anthropic: '', openrouter: '' }, paceMs: 150, maxRunning: 1, clientCooldownMs: 0, perDay: 5 };
 
+// two cheap OpenRouter models the house pays for, answered by the fake OpenRouter below (the tests never go online)
+const cheap = (id, name) => ({ id, vendor: 'z-ai', name, model: `z-ai/${id}`, openrouter: `z-ai/${id}`, released: '2026-03-01', price: { in: 0.1, out: 0.2 }, provider: 'openrouter', reasoning: false, json: false });
+const BUDGET_CATALOG = [...TEST_CATALOG, scripted(7, 'Test Seven'), scripted(8, 'Test Eight'), cheap('cheap1', 'Cheap One'), cheap('cheap2', 'Cheap Two')];
+const HOUSE_KEY = 'sk-or-house-0123456789', VISITOR_KEY = 'sk-or-visitor-9876543210';
+/** Stand in for OpenRouter: every call gets a legal-enough decision, a reasoning line and the given cost. */
+function fakeOpenRouter(costPerCall) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith('https://openrouter.ai/')) return real(url, init);
+    calls.push({ auth: init.headers.authorization, body: JSON.parse(init.body) });
+    const content = JSON.stringify({ target: 'p3', text: 'I am a plain villager, honestly.', lie: false, confessional: 'A test move.' });
+    const reply = { model: 'z-ai/fake', choices: [{ message: { content, reasoning: 'fake reasoning' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1000, completion_tokens: 50, cost: costPerCall } };
+    return new Response(JSON.stringify(reply), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  return { calls, restore() { globalThis.fetch = real; } };
+}
+const finished = (app, id) => until(async () => { const v = (await json(app.url + `/api/tables/${id}`)).body; return v.table.status === 'finished' ? v : null; }, `table ${id} to finish`, { tries: 1200 });
+
 test('the built-in catalog is sound: twenty or more current models, valid arena names, a house tier', () => {
   assert.ok(checkCatalog(CATALOG));
   assert.ok(CATALOG.length >= 20, `${CATALOG.length} models`);
@@ -146,5 +165,106 @@ test('a model that is busy elsewhere cannot be seated twice, and a table is lost
     assert.equal(app.store.getTable(first.body.table.id).status, 'lost');
   } finally {
     await app.close();
+  }
+});
+
+test('the house stops paying at its daily dollar budget: refused ahead by the estimate, cut to neutral moves past it, then every seat on the visitor\'s key', async () => {
+  const fake = fakeOpenRouter(0.02);
+  const app = await startServer({ port: 0, host: '127.0.0.1', dataDir: ':memory:', loadEnv: false, arena: { tickMs: 20, actionTimeoutMs: 10_000 }, tables: { ...tableOptions, catalog: BUDGET_CATALOG, keys: { anthropic: '', openrouter: HOUSE_KEY }, houseBudgetUsd: 0.04, perClientDay: 10 } });
+  try {
+    let cat = (await json(app.url + '/api/tables/catalog')).body;
+    assert.deepEqual([cat.limits.house_budget_usd, cat.limits.house_spent_usd, cat.limits.house_left_usd, cat.limits.house_closed, cat.limits.your_house_tables_today], [0.04, 0, 0.04, null, 0]);
+    assert.ok(cat.models.find(m => m.id === 'cheap1').house, 'a cheap model is on the house while the budget lasts');
+    assert.deepEqual(cat.models.find(m => m.id === 'cheap1').needs, []);
+
+    // a table that would take the house past its budget is refused before it starts (two cheap seats estimate at $0.011)
+    app.tables.spend.push({ t: Date.now(), usd: 0.035 });
+    const two = ['cheap1', 'cheap2', 't1', 't2', 't3'];
+    let r = await postJson(app.url + '/api/tables', { seats: two });
+    assert.equal(r.status, 429); assert.equal(r.body.error, 'budget_spent');
+    assert.equal(r.body.spent_usd, 0.035); assert.equal(r.body.budget_usd, 0.04); assert.ok(r.body.retry_after_s >= 60);
+    assert.equal(app.tables.houseClosed(), null, 'under the budget the house is still open');
+
+    // with $0.025 spent the estimate fits; the two fake seats then cost two cents a move and the budget runs out on the first
+    app.tables.spend.length = 0;
+    app.tables.spend.push({ t: Date.now(), usd: 0.025 });
+    r = await postJson(app.url + '/api/tables', { seats: two });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.table.paid_by, 'house');
+    assert.ok(r.body.table.seats.slice(0, 2).every(s => s.route === 'openrouter' && s.paid_by === 'house'));
+    const done = await finished(app, r.body.table.id);
+    const mine = done.table.thoughts.filter(th => th.seat <= 2);
+    const paid = mine.filter(th => !th.stand_in), cut = mine.filter(th => th.stand_in);
+    assert.ok(paid.length >= 1 && paid.length <= 2, `${paid.length} paid moves (the night moves that went out before the budget was gone)`);
+    assert.ok(cut.length >= 1, 'later moves of the house seats were neutral');
+    for (const th of cut) { assert.match(th.error, /budget/); assert.equal(th.cost_usd, 0); assert.equal(th.thinking, null); assert.equal(th.applied, true); }
+    for (const th of paid) { assert.equal(th.cost_usd, 0.02); assert.equal(th.thinking, 'fake reasoning'); assert.equal(th.served_by, 'z-ai/fake'); }
+    assert.equal(done.table.totals.cost_usd, Math.round(paid.length * 0.02 * 1e6) / 1e6);
+    assert.equal(fake.calls.length, paid.length);
+    assert.ok(fake.calls.every(c => c.auth === `Bearer ${HOUSE_KEY}`), 'the house key was used');
+    const spentAfter = app.tables.houseSpent();
+    assert.ok(spentAfter >= 0.04, `${spentAfter} spent`);
+    assert.equal(app.tables.houseClosed(), 'budget');
+
+    // the house is closed: cheap models now need the visitor's key like any other
+    cat = (await json(app.url + '/api/tables/catalog')).body;
+    assert.equal(cat.limits.house_closed, 'budget');
+    assert.equal(cat.limits.house_left_usd, 0);
+    assert.ok(cat.limits.house_reopens_s >= 60);
+    assert.equal(cat.models.find(m => m.id === 'cheap1').house, false);
+    assert.deepEqual(cat.models.find(m => m.id === 'cheap1').needs, ['openrouter']);
+    assert.ok(cat.models.find(m => m.id === 't1').house, 'scripted seats cost nothing and stay on the house');
+    r = await postJson(app.url + '/api/tables', { seats: ['cheap1', 't1', 't2', 't3', 't4'] });
+    assert.equal(r.status, 429); assert.equal(r.body.error, 'house_closed'); assert.equal(r.body.reason, 'budget');
+    assert.deepEqual(r.body.models, ['cheap1']); assert.deepEqual(r.body.keys, ['openrouter']);
+    assert.match(r.body.message, /\$0\.04/);
+    // ... and with one, the table runs on it and costs the house nothing
+    const before = fake.calls.length;
+    r = await postJson(app.url + '/api/tables', { seats: ['cheap1', 't1', 't2', 't3', 't4'], keys: { openrouter: VISITOR_KEY } });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.table.paid_by, 'visitor');
+    assert.equal(r.body.table.seats[0].paid_by, 'visitor');
+    const yours = await finished(app, r.body.table.id);
+    const played = yours.table.thoughts.filter(th => th.seat === 1);
+    assert.ok(played.length >= 1 && played.every(th => !th.stand_in && th.cost_usd === 0.02), 'every move of the visitor-paid seat was answered');
+    assert.ok(fake.calls.slice(before).length === played.length && fake.calls.slice(before).every(c => c.auth === `Bearer ${VISITOR_KEY}`), 'the visitor key was used');
+    assert.equal(app.tables.houseSpent(), spentAfter, 'the visitor\'s moves are not on the house ledger');
+  } finally {
+    await app.close();
+    fake.restore();
+  }
+});
+
+test('a visitor gets a daily share of house-paid tables; past it their tables run on their own key', async () => {
+  const fake = fakeOpenRouter(0.001);
+  const app = await startServer({ port: 0, host: '127.0.0.1', dataDir: ':memory:', loadEnv: false, arena: { tickMs: 20, actionTimeoutMs: 10_000 }, tables: { ...tableOptions, catalog: BUDGET_CATALOG, keys: { anthropic: '', openrouter: HOUSE_KEY }, houseBudgetUsd: 10, perClientDay: 1, maxRunning: 2 } });
+  try {
+    let cat = (await json(app.url + '/api/tables/catalog')).body;
+    assert.equal(cat.limits.per_client_day, 1);
+    assert.equal(cat.limits.your_house_tables_today, 0);
+    let r = await postJson(app.url + '/api/tables', { seats: ['cheap1', 't1', 't2', 't3', 't4'] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.table.paid_by, 'house');
+    const first = r.body.table.id;
+    cat = (await json(app.url + '/api/tables/catalog')).body;
+    assert.equal(cat.limits.your_house_tables_today, 1);
+    assert.equal(cat.limits.house_closed, 'per_client');
+    assert.equal(cat.models.find(m => m.id === 'cheap2').house, false);
+    r = await postJson(app.url + '/api/tables', { seats: ['cheap2', 't5', 't6', 't7', 't8'] });
+    assert.equal(r.status, 429); assert.equal(r.body.error, 'house_closed'); assert.equal(r.body.reason, 'per_client');
+    assert.match(r.body.message, /1 table a day per visitor/);
+    r = await postJson(app.url + '/api/tables', { seats: ['cheap2', 't5', 't6', 't7', 't8'], keys: { openrouter: VISITOR_KEY } });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.table.paid_by, 'visitor');
+    const [a, b] = await Promise.all([finished(app, first), finished(app, r.body.table.id)]);
+    const houseMoves = a.table.thoughts.filter(th => th.seat === 1 && !th.stand_in).length;
+    assert.ok(houseMoves >= 1);
+    assert.equal(app.tables.houseSpent(), Math.round(houseMoves * 0.001 * 1e6) / 1e6, 'only the house-paid seat is on the ledger');
+    assert.ok(b.table.thoughts.filter(th => th.seat === 1).every(th => !th.stand_in));
+    assert.ok(fake.calls.some(c => c.auth === `Bearer ${HOUSE_KEY}`) && fake.calls.some(c => c.auth === `Bearer ${VISITOR_KEY}`));
+    assert.equal((await json(app.url + '/api/tables/catalog')).body.limits.house_spent_usd, app.tables.houseSpent());
+  } finally {
+    await app.close();
+    fake.restore();
   }
 });

@@ -394,7 +394,7 @@ export class WerewolfGame {
     if (me.role === 'seer') {
       you.inspections = (s.secrets.inspections[me.id] || []).map(i => ({ round: i.round, player_id: i.target, name: this.player(i.target).name, result: i.result }));
     }
-    const reasoningDoc = 'your private thoughts (string, revealed to spectators only after the game)';
+    const reasoningDoc = 'your confessional for the audience (string, optional): in character, the role you really hold, what this move is for and whom you suspect. Sealed while the game runs, shown to spectators beside the move once the game ends';
     let respondWith;
     if (req.type === 'statement') respondWith = { action: { text: `what you say to the village (string, max ${s.options.statementMaxChars} chars)`, lie: 'optional boolean: true if this statement is a lie. Sealed until the game ends, then published as your truth ledger' }, reasoning: reasoningDoc };
     else if (req.options.length) respondWith = { action: { target: 'a player_id from options' }, reasoning: reasoningDoc };
@@ -428,7 +428,7 @@ export class WerewolfGame {
         case 'werewolf': return 'Night: choose a player to kill. Return action {"target": player_id} from options. If your pack disagrees, one of the chosen targets is picked at random. Nobody else sees who you chose.' + (me.alive && s.players.some(p => p.role === 'werewolf' && p.alive && p.id !== me.id) ? ' Your pack can whisper tonight (the agent guide explains how); whispers so far are in you.pack_whispers, so whisper first, poll again, then choose.' : '');
         case 'seer': return 'Night: choose a player to inspect. You privately learn whether they are a werewolf (see you.inspections in later requests). Return action {"target": player_id} from options.';
         case 'doctor': return 'Night: choose a player to protect, yourself included. If the werewolves attack that player tonight, nobody dies. Return action {"target": player_id} from options.';
-        default: return 'Night: you have no night power. Return action {} and use reasoning to record your private suspicions; spectators read it after the game.';
+        default: return 'Night: you have no night power. Return action {} and use reasoning for your confessional: whom you suspect and why. Spectators read it once the game ends.';
       }
     }
     if (req.type === 'statement') {

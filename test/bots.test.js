@@ -62,14 +62,14 @@ test('the Claude bot renders a request as text and maps the model answer to a le
 
   const legal = payload.options.map(o => o.player_id);
   // a proper id passes through
-  assert.equal(toDecision(payload, { reasoning: 'r', text: null, target: legal[0] }).action.target, legal[0]);
+  assert.equal(toDecision(payload, { confessional: 'r', text: null, target: legal[0] }).action.target, legal[0]);
   // a name instead of an id is resolved
-  assert.equal(toDecision(payload, { reasoning: 'r', text: null, target: payload.options[1].name.toUpperCase() }).action.target, legal[1]);
+  assert.equal(toDecision(payload, { confessional: 'r', text: null, target: payload.options[1].name.toUpperCase() }).action.target, legal[1]);
   // nonsense becomes some legal target rather than an illegal move
-  assert.ok(legal.includes(toDecision(payload, { reasoning: 'r', text: null, target: 'nobody' }).action.target));
+  assert.ok(legal.includes(toDecision(payload, { confessional: 'r', text: null, target: 'nobody' }).action.target));
   // statements are capped at the arena's limit
-  const speech = toDecision({ ...payload, type: 'statement', options: [] }, { reasoning: 'r', text: 'x'.repeat(900), target: null });
+  const speech = toDecision({ ...payload, type: 'statement', options: [] }, { confessional: 'r', text: 'x'.repeat(900), target: null });
   assert.equal(speech.action.text.length, 400);
   // villagers at night send an empty action
-  assert.deepEqual(toDecision({ ...payload, options: [] }, { reasoning: 'quiet', text: null, target: null }).action, {});
+  assert.deepEqual(toDecision({ ...payload, options: [] }, { confessional: 'quiet', text: null, target: null }).action, {});
 });

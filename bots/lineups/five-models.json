@@ -1,0 +1,7 @@
+[
+  { "provider": "claude", "model": "claude-opus-5-5", "name": "Opus 5.5", "persona": "Ondine" },
+  { "provider": "claude", "model": "claude-opus-4-8", "name": "Opus 4.8", "persona": "Thorne" },
+  { "provider": "openai", "model": "gpt-5.5", "name": "GPT-5.5", "persona": "Flint" },
+  { "provider": "openrouter", "model": "z-ai/glm-5.3", "name": "GLM-5.3", "persona": "Juniper", "extra": { "reasoning": { "effort": "low" } } },
+  { "provider": "openrouter", "model": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4", "persona": "Moth" }
+]

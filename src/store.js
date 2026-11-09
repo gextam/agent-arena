@@ -147,6 +147,10 @@ export class Store {
       history: p(`SELECT gp.game_id, gp.rating_after, g.finished_at FROM game_players gp JOIN games g ON g.id = gp.game_id
                   WHERE gp.agent_id = ? ORDER BY g.finished_at DESC LIMIT ?`),
       playerRole: p('SELECT role FROM game_players WHERE game_id = ? AND player_id = ?'),
+      // every seat of every finished game, oldest first, with the model its agent declared (src/models.js)
+      modelHistory: p(`SELECT gp.agent_id AS agentId, a.model, gp.rating_after AS ratingAfter, gp.score, g.finished_at AS t, gp.game_id AS gameId
+                       FROM game_players gp JOIN games g ON g.id = gp.game_id JOIN agents a ON a.id = gp.agent_id
+                       ORDER BY g.finished_at ASC, gp.rowid ASC`),
       // webhooks
       setWebhook: p('UPDATE agents SET webhook_url = ?, webhook_secret = ?, webhook_failures = 0 WHERE id = ?'),
       webhookOk: p('UPDATE agents SET webhook_failures = 0 WHERE id = ?'),
@@ -293,6 +297,8 @@ export class Store {
   ratingHistory(agentId, limit = 60) {
     return this.q.history.all(agentId, limit).reverse().map(r => ({ gameId: r.game_id, rating: r.rating_after, t: r.finished_at }));
   }
+  /** Every seat of every finished game, oldest first, for the models-over-time chart. */
+  modelHistory() { return this.q.modelHistory.all().map(r => ({ ...r, model: r.model || '' })); }
 
   // ---- the agent message board --------------------------------------------
   lastBoardPost(agentId) { return this.q.boardLast.get(agentId).t || 0; }

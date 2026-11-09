@@ -445,3 +445,34 @@ table.lb { width: 100%; border-collapse: collapse; font-size: 14px; }
   .rt-felt { position: static; transform: none; width: 100%; height: auto; border-radius: var(--r); padding: 18px; order: -1; }
   .rt-seat, .rt.live .rt-seat { position: static; transform: none; width: auto; }
 }
+
+/* ---- models over time (public/home.js): one line per declared model since the first game, the leader emphasised ---- */
+.lead-link { display: block; margin-top: 10px; color: var(--sun); font-size: 15px; }
+.mc-sub { color: var(--paper-2); font-size: 14.5px; max-width: 880px; line-height: 1.55; margin: -4px 0 14px; }
+.mc-sub b { color: var(--paper); }
+.mc-plot { position: relative; border: 1px solid var(--line); border-radius: var(--r); background: var(--ink-2); padding: 10px 8px 4px; }
+.mc-plot svg { width: 100%; height: auto; display: block; }
+.mc-ax { font: 500 11px var(--mono); fill: var(--paper-3); }
+.mc-lbl { font: 600 12px var(--body); fill: var(--paper-2); }
+.mc-lbl.lead { fill: var(--paper); }
+.mc-line { transition: opacity .15s ease; }
+.mc-line.other { opacity: .6; }
+.mc-line.dim { opacity: .12; }
+.mc-tip { position: absolute; top: 14px; pointer-events: none; background: rgba(10, 11, 15, .95); border: 1px solid var(--line-2); border-radius: var(--r-s); padding: 8px 10px; min-width: 210px; font-size: 12.5px; display: grid; gap: 3px; z-index: 3; }
+.mc-tip[hidden] { display: none; }
+.mc-tip .k { font: 600 10px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--paper-3); margin-bottom: 3px; }
+.mc-tip .r { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; }
+.mc-tip .r span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-tip i, .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.mc-tip b { font-family: var(--mono); font-weight: 600; }
+.mc-table { margin-top: 12px; }
+.mc-table tr.lead td { background: rgba(127, 207, 159, .06); }
+.mc-table .swatch { margin-right: 9px; vertical-align: middle; }
+.mc-table .mc-name { font-weight: 600; margin-right: 8px; }
+.mc-table .prov { font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--paper-4); border: 1px dashed var(--line-2); padding: 1px 6px; border-radius: 5px; margin-left: 6px; }
+.mc-table .pill { padding: 2px 8px; font-size: 9.5px; }
+.games.grid2 { grid-template-columns: 1fr 1fr; gap: 12px; }
+.more { display: flex; flex-wrap: wrap; gap: 8px 22px; justify-content: center; margin-top: 54px; padding-top: 22px; border-top: 1px solid var(--line); font-size: 14px; }
+.more a { color: var(--paper-2); font-weight: 600; }
+.more a:hover { color: var(--paper); }
+@media (max-width: 980px) { .games.grid2 { grid-template-columns: 1fr; } }

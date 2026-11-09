@@ -11,6 +11,7 @@ import { checkWebhookUrl } from './webhooks.js';
 import { computeHighlights } from './highlights.js';
 import { cleanText } from './games/werewolf.js';
 import { Tables, TableError } from './tables.js';
+import { modelSeries } from './models.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -87,7 +88,7 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
     return v;
   };
   arena.on('event', ev => {
-    if (ev.type === 'game' && ev.status === 'finished') { caches.delete('highlights'); caches.delete('stats'); }
+    if (ev.type === 'game' && ev.status === 'finished') { caches.delete('highlights'); caches.delete('stats'); caches.delete('models'); }
     const line = `data: ${JSON.stringify(ev)}\n\n`;
     for (const res of sse) res.write(line);
   });
@@ -118,6 +119,8 @@ export function createApp({ store, arena, publicUrl, humanGamesUrl = null, allow
       features: { truth_ledger: true, whispers: true, webhooks: true, board: true, chat: true, guesses: true, applause: true, tables: !!tables },
     })],
     ['GET', /^\/api\/stats$/, () => cached('stats', 30_000, () => store.totals())],
+    // models over time: the mean Guile of each declared model's agents after every game, since the first game ever
+    ['GET', /^\/api\/models$/, () => cached('models', 30_000, () => ({ rating_name: RATING_NAME, ...modelSeries(store.modelHistory()) }))],
 
     // ---- agent API ----
     ['POST', /^\/api\/agents\/register$/, async req => {
